@@ -46,12 +46,28 @@ export class AuthService {
     if (existing) throw new ConflictException('用户名已存在');
 
     const hash = await bcrypt.hash(dto.password, 12);
+
+    // 把客户端送来的 base64 / hex 解成 Buffer 落库（Prisma Bytes）
+    const sm2PrivByPwd = Buffer.from(dto.sm2PrivByPwd, 'base64');
+    const sm2PrivByRecovery = Buffer.from(dto.sm2PrivByRecovery, 'base64');
+    const kdfSalt = Buffer.from(dto.kdfSalt, 'base64');
+    const recoveryHash = Buffer.from(dto.recoveryHash, 'base64');
+    const personalDek = Buffer.from(dto.personalLedgerDekWrapped, 'base64');
+
     const user = await this.prisma.user.create({
-      data: { username: dto.username, password: hash },
+      data: {
+        username: dto.username,
+        password: hash,
+        sm2PubKey: dto.sm2PubKey,
+        sm2PrivByPwd,
+        sm2PrivByRecovery,
+        kdfSalt,
+        recoveryHash,
+      },
     });
 
-    // 自动创建个人账本
-    const ledger = await this.ledgers.createPersonalLedger(user.id);
+    // 自动创建个人账本，DEK 由客户端预包装传入
+    const ledger = await this.ledgers.createPersonalLedger(user.id, personalDek);
 
     const token = this.jwt.sign({ userId: user.id });
     return {
@@ -62,6 +78,13 @@ export class AuthService {
         username: user.username,
         nickname: user.nickname,
         currentLedgerId: ledger.id,
+      }),
+      // 注册即返回 keyBundle，让客户端可立即缓存（避免马上再发一次 login）
+      keyBundle: this.buildKeyBundleStub({
+        sm2PubKey: dto.sm2PubKey,
+        sm2PrivByPwd: dto.sm2PrivByPwd,
+        sm2PrivByRecovery: dto.sm2PrivByRecovery,
+        kdfSalt: dto.kdfSalt,
       }),
     };
   }
@@ -75,7 +98,9 @@ export class AuthService {
     const match = await bcrypt.compare(dto.password, user.password);
     if (!match) throw new UnauthorizedException('用户名或密码错误');
 
-    // 防御：极少数情况下用户没有当前账本（比如被踢出唯一账本）
+    // 防御：极少数情况下用户没有当前账本（被踢出唯一账本）
+    // E2E 加密下，服务端无法自动建账本（无法生成 DEK），让客户端拿到 keyBundle
+    // 后调 POST /ledgers 主动建一个，并把当前账本指向新账本
     let currentLedgerId = user.currentLedgerId;
     if (!currentLedgerId) {
       const personal = await this.prisma.ledger.findFirst({
@@ -87,10 +112,8 @@ export class AuthService {
           where: { id: user.id },
           data: { currentLedgerId },
         });
-      } else {
-        const ledger = await this.ledgers.createPersonalLedger(user.id);
-        currentLedgerId = ledger.id;
       }
+      // 否则保持 null，让客户端发现后建账本
     }
 
     const token = this.jwt.sign({ userId: user.id });
@@ -103,6 +126,31 @@ export class AuthService {
         nickname: user.nickname,
         currentLedgerId,
       }),
+      keyBundle: {
+        sm2PubKey: user.sm2PubKey,
+        sm2PrivByPwd: user.sm2PrivByPwd
+          ? user.sm2PrivByPwd.toString('base64')
+          : null,
+        sm2PrivByRecovery: user.sm2PrivByRecovery
+          ? user.sm2PrivByRecovery.toString('base64')
+          : null,
+        kdfSalt: user.kdfSalt ? user.kdfSalt.toString('base64') : null,
+      },
+    };
+  }
+
+  /** keyBundle 装配（注册路径用，跟 login 一致 shape） */
+  private buildKeyBundleStub(b: {
+    sm2PubKey: string;
+    sm2PrivByPwd: string;
+    sm2PrivByRecovery: string;
+    kdfSalt: string;
+  }) {
+    return {
+      sm2PubKey: b.sm2PubKey,
+      sm2PrivByPwd: b.sm2PrivByPwd,
+      sm2PrivByRecovery: b.sm2PrivByRecovery,
+      kdfSalt: b.kdfSalt,
     };
   }
 
@@ -122,7 +170,6 @@ export class AuthService {
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {
-    // 把空字符串视为"清除昵称"
     const nickname =
       dto.nickname === undefined
         ? undefined

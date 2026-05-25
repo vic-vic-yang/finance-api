@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { PrismaModule } from './prisma/prisma.module';
+import { CryptoModule } from './crypto/crypto.module';
 import { AuthModule } from './auth/auth.module';
 import { AccountsModule } from './accounts/accounts.module';
 import { CategoriesModule } from './categories/categories.module';
@@ -20,6 +21,7 @@ import { LedgersModule } from './ledgers/ledgers.module';
       { name: 'default', ttl: 60_000, limit: 60 },
     ]),
     PrismaModule,
+    CryptoModule,
     AuthModule,
     AccountsModule,
     CategoriesModule,

@@ -13,14 +13,14 @@ enum BillType {
 }
 
 enum AccountType {
-  CASH        // 现金
-  BANK        // 银行卡（储蓄卡/借记卡/存折）
-  VIRTUAL     // 虚拟账户（微信/支付宝/电子钱包等）
-  CREDIT      // 信用卡
-  INVESTMENT  // 投资理财（理财 / 股票 / 基金 / 债券）
-  INSURANCE   // 社保（社保 / 公积金 / 保险）
-  DEBT        // 负债账户（房贷 / 车贷 / 借款）
-  OTHER       // 其他
+  CASH // 现金
+  BANK // 银行卡（储蓄卡/借记卡/存折）
+  VIRTUAL // 虚拟账户（微信/支付宝/电子钱包等）
+  CREDIT // 信用卡
+  INVESTMENT // 投资理财（理财 / 股票 / 基金 / 债券）
+  INSURANCE // 社保（社保 / 公积金 / 保险）
+  DEBT // 负债账户（房贷 / 车贷 / 借款）
+  OTHER // 其他
   // ─── 历史保留（PG 不能干净地删 enum 值，仅用于读取旧数据）───
   ALIPAY
   WECHAT
@@ -43,42 +43,61 @@ model User {
   nickname        String?
   password        String
   createdAt       DateTime       @default(now())
-  currentLedgerId String?        // 当前活动账本
+  currentLedgerId String? // 当前活动账本
   currentLedger   Ledger?        @relation("CurrentLedger", fields: [currentLedgerId], references: [id], onDelete: SetNull)
   ownedLedgers    Ledger[]       @relation("OwnedLedgers")
   ledgerMembers   LedgerMember[]
-  bills           Bill[]         // 创建者，便于追踪是谁记的
-  categories      Category[]     // 用户自建分类（系统分类 userId=null）
+  bills           Bill[] // 创建者，便于追踪是谁记的
+  categories      Category[] // 用户自建分类（系统分类 userId=null）
   ownedAccounts   Account[]      @relation("AccountOwner")
+
+  // ── 国密 SM2 用户密钥对（端到端加密基础）───────────────────
+  /// SM2 公钥（hex 字符串，未压缩 04|x|y 共 130 个字符）
+  sm2PubKey         String?
+  /// SM2 私钥用 KDF(密码) 派生的 SM4 密钥加密后的字节流（iv||ct||mac）
+  sm2PrivByPwd      Bytes?
+  /// SM2 私钥用 KDF(恢复码) 派生的 SM4 密钥加密后的字节流（找回密钥用）
+  sm2PrivByRecovery Bytes?
+  /// 派生 KEK 用的 salt（密码 + 恢复码共用同一个 salt，简化客户端逻辑）
+  kdfSalt           Bytes?
+  /// 恢复码 SM3(code || salt) 哈希，用于"忘密码 → 验证恢复码"
+  recoveryHash      Bytes?
 }
 
 model Ledger {
-  id          String         @id @default(cuid())
-  name        String
-  icon        String?        // emoji
-  ownerId     String
-  owner       User           @relation("OwnedLedgers", fields: [ownerId], references: [id], onDelete: Cascade)
-  isPersonal  Boolean        @default(false) // true=个人默认账本，不可删除/退出
-  createdAt   DateTime       @default(now())
-  members     LedgerMember[]
-  invites     LedgerInvite[]
-  accounts    Account[]
-  bills       Bill[]
-  budgets     Budget[]
-  categories  Category[]
-  currentFor  User[]         @relation("CurrentLedger")
+  id         String         @id @default(cuid())
+  name       String
+  icon       String? // emoji
+  ownerId    String
+  owner      User           @relation("OwnedLedgers", fields: [ownerId], references: [id], onDelete: Cascade)
+  isPersonal Boolean        @default(false) // true=个人默认账本，不可删除/退出
+  createdAt  DateTime       @default(now())
+  members    LedgerMember[]
+  invites    LedgerInvite[]
+  accounts   Account[]
+  bills      Bill[]
+  budgets    Budget[]
+  categories Category[]
+  currentFor User[]         @relation("CurrentLedger")
 
   @@index([ownerId])
 }
 
 model LedgerMember {
-  id        String     @id @default(cuid())
-  ledgerId  String
-  ledger    Ledger     @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
-  userId    String
-  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role      LedgerRole @default(member)
-  joinedAt  DateTime   @default(now())
+  id       String     @id @default(cuid())
+  ledgerId String
+  ledger   Ledger     @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     LedgerRole @default(member)
+  joinedAt DateTime   @default(now())
+
+  // ── 信封加密：该账本 DEK 用该成员公钥 SM2 包装后的密文 ──
+  /// 包装后的 DEK；新成员通过邀请码加入后此处先为 null，
+  /// 由任意已持有 DEK 的在线成员客户端检测到后自动 wrap & 上传
+  dekWrapped Bytes?
+  /// DEK 版本号，支持密钥轮换（v2 起所有成员需重新 wrap）
+  dekVersion Int    @default(1)
 
   @@unique([ledgerId, userId])
   @@index([userId])
@@ -99,75 +118,79 @@ model LedgerInvite {
 }
 
 model Account {
-  id        String      @id @default(cuid())
-  ledgerId  String
-  ledger    Ledger      @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  id         String      @id @default(cuid())
+  ledgerId   String
+  ledger     Ledger      @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
   /// 账户所有者：null = 共享账户（账本内所有成员可用）；非空 = 私人账户（仅本人可见可用）
-  ownerId   String?
-  owner     User?       @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: SetNull)
-  name      String
-  type      AccountType
-  balance   Decimal     @default(0) @db.Decimal(15, 2)
-  icon      String?
-  color     String?
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
-  bills     Bill[]
+  ownerId    String?
+  owner      User?       @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  /// 账户名密文（SM4-CBC + SM3-HMAC, iv||ct||mac 一体）。
+  /// 服务端永不解密；客户端用账本 DEK 解。
+  nameCipher Bytes
+  /// 加密时使用的 DEK 版本（用于密钥轮换）
+  nameDekVer Int         @default(1)
+  type       AccountType
+  balance    Decimal     @default(0) @db.Decimal(15, 2)
+  icon       String?
+  color      String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  bills      Bill[]
 
   // ── 信用卡专用 ─────────────────────────────────────────────
   /// 账单日（1-31）：每月这一天出账
-  statementDay  Int?
+  statementDay Int?
   /// 还款日（1-31）：每月这一天前需还款
-  dueDay        Int?
+  dueDay       Int?
   /// 信用额度（可选，仅信用卡使用，用于显示"已用 / 总额度"）
-  creditLimit   Decimal? @db.Decimal(15, 2)
+  creditLimit  Decimal? @db.Decimal(15, 2)
 
   // ── 负债账户专用 ──────────────────────────────────────────
   /// 年利率（%），如 5.4 表示 5.4%；dueDay 复用为月还款日
-  interestRate  Decimal? @db.Decimal(6, 3)
+  interestRate     Decimal?  @db.Decimal(6, 3)
   /// 贷款本金（原始金额）
-  loanPrincipal     Decimal?  @db.Decimal(15, 2)
+  loanPrincipal    Decimal?  @db.Decimal(15, 2)
   /// 贷款期限（月）
-  loanTermMonths    Int?
+  loanTermMonths   Int?
   /// 首次还款日期（用于计算已还期数）
-  firstPaymentDate  DateTime?
+  firstPaymentDate DateTime?
   /// 还款方式：equal_payment(等额本息) / equal_principal(等额本金) / interest_only(先息后本)
-  repaymentMethod   String?
+  repaymentMethod  String?
 
   // ── 自动入账（社保 / 公积金 / 工资固定到账）专用 ─────────
   /// 每月自动入账日（1-31）
-  autoDepositDay     Int?
+  autoDepositDay        Int?
   /// 每月自动入账金额
-  autoDepositAmount  Decimal? @db.Decimal(15, 2)
+  autoDepositAmount     Decimal?  @db.Decimal(15, 2)
   /// 自动入账记入哪个分类（可选；为空时后端用"其他收入"系统分类）
   autoDepositCategoryId String?
   /// 自动入账上次处理到的日期（用于补漏，不依赖定时任务）
-  lastAutoProcessedAt DateTime?
+  lastAutoProcessedAt   DateTime?
 
   @@index([ledgerId])
   @@index([ownerId])
 }
 
 model Category {
-  id        String    @id @default(cuid())
-  ledgerId  String?   // null = 系统分类（全局共享）
-  ledger    Ledger?   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
-  userId    String?   // 创建者，便于审计；null 表示系统
-  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  id        String   @id @default(cuid())
+  ledgerId  String? // null = 系统分类（全局共享）
+  ledger    Ledger?  @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  userId    String? // 创建者，便于审计；null 表示系统
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   name      String
   type      BillType
   icon      String?
   color     String?
-  isSystem  Boolean   @default(false)
-  createdAt DateTime  @default(now())
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
 
   // —— 二级分类支持：parentId 为空 = 一级分类 ——
-  parentId  String?
-  parent    Category?  @relation("CategoryChildren", fields: [parentId], references: [id], onDelete: Cascade)
-  children  Category[] @relation("CategoryChildren")
+  parentId String?
+  parent   Category?  @relation("CategoryChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children Category[] @relation("CategoryChildren")
 
-  bills     Bill[]
-  budgets   Budget[]
+  bills   Bill[]
+  budgets Budget[]
 
   @@index([ledgerId])
   @@index([parentId])
@@ -177,7 +200,7 @@ model Bill {
   id         String   @id @default(cuid())
   ledgerId   String
   ledger     Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
-  userId     String   // 记账人，多账本时显示"谁记的"
+  userId     String // 记账人，多账本时显示"谁记的"
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   accountId  String
   account    Account  @relation(fields: [accountId], references: [id])
@@ -185,7 +208,11 @@ model Bill {
   category   Category @relation(fields: [categoryId], references: [id])
   type       BillType
   amount     Decimal  @db.Decimal(15, 2)
-  note       String   @default("")
+  /// 备注密文（SM4-CBC + SM3-HMAC, iv||ct||mac 一体）。
+  /// 空备注也加密为一个固定密文（避免空字段泄露"无备注"信息）
+  noteCipher Bytes
+  /// 加密所用 DEK 版本
+  noteDekVer Int      @default(1)
   date       DateTime
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt

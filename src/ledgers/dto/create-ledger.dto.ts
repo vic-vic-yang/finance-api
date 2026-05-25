@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, MaxLength, IsOptional } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  MaxLength,
+  IsOptional,
+  IsBase64,
+} from 'class-validator';
 
 export class CreateLedgerDto {
   @IsString()
@@ -9,4 +15,8 @@ export class CreateLedgerDto {
   @IsString()
   @IsOptional()
   icon?: string;
+
+  /** 本账本的 DEK，用创建者自己的 SM2 公钥包装后的字节流（base64） */
+  @IsBase64()
+  dekWrapped: string;
 }

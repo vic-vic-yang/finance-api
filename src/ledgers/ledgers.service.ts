@@ -55,8 +55,13 @@ export class LedgersService {
     };
   }
 
-  /** 创建一个新账本，并把自己加为 owner */
+  /** 创建一个新账本，并把自己加为 owner。
+   *  E2E 加密：客户端必须在创建时附上"用自己公钥包装好的 DEK"。 */
   async create(userId: string, dto: CreateLedgerDto) {
+    if (!dto.dekWrapped) {
+      throw new BadRequestException('缺少 dekWrapped（账本数据密钥）');
+    }
+    const dekBuf = Buffer.from(dto.dekWrapped, 'base64');
     const ledger = await this.prisma.$transaction(async (tx) => {
       const l = await tx.ledger.create({
         data: {
@@ -67,11 +72,22 @@ export class LedgersService {
         },
       });
       await tx.ledgerMember.create({
-        data: { ledgerId: l.id, userId, role: 'owner' },
+        data: {
+          ledgerId: l.id,
+          userId,
+          role: 'owner',
+          dekWrapped: dekBuf,
+          dekVersion: 1,
+        },
       });
       return l;
     });
-    return { message: '创建成功', ledger };
+    return {
+      message: '创建成功',
+      ledger,
+      dekWrapped: dekBuf.toString('base64'),
+      dekVersion: 1,
+    };
   }
 
   /** 切换当前账本 */
@@ -160,7 +176,7 @@ export class LedgersService {
     };
   }
 
-  /** 使用邀请码加入账本 */
+  /** 使用邀请码加入账本（dekWrapped 暂为 null，待已有成员客户端帮忙包装） */
   async join(userId: string, dto: JoinLedgerDto) {
     const invite = await this.prisma.ledgerInvite.findUnique({
       where: { code: dto.code },
@@ -184,6 +200,7 @@ export class LedgersService {
           ledgerId: invite.ledgerId,
           userId,
           role: 'member',
+          // dekWrapped: null  — 待原成员的客户端轮询发现后 wrap 上传
         },
       }),
       this.prisma.ledgerInvite.update({
@@ -197,8 +214,90 @@ export class LedgersService {
     ]);
 
     return {
-      message: `已加入「${invite.ledger.name}」`,
+      message: `已加入「${invite.ledger.name}」，等待原成员授权解密`,
       ledger: invite.ledger,
+      pending: true,
+    };
+  }
+
+  /** 列出本账本里 dekWrapped 为空的成员（含其公钥），用于已持有 DEK 的成员
+   *  客户端帮忙 wrap 后调 attachDek 上传。
+   *  只有持有 DEK 的成员可以调（dekWrapped != null）。 */
+  async listPendingMembers(userId: string, ledgerId: string) {
+    const self = await this.ensureMembership(userId, ledgerId);
+    if (!self.dekWrapped) {
+      // 自己都没拿到 DEK，没法帮别人；返回空即可
+      return { pending: [], selfPending: true };
+    }
+    const pending = await this.prisma.ledgerMember.findMany({
+      where: { ledgerId, dekWrapped: null },
+      include: {
+        user: {
+          select: { id: true, username: true, nickname: true, sm2PubKey: true },
+        },
+      },
+    });
+    return {
+      selfPending: false,
+      myDekVersion: self.dekVersion,
+      pending: pending.map((m) => ({
+        userId: m.userId,
+        username: m.user.username,
+        nickname: m.user.nickname,
+        sm2PubKey: m.user.sm2PubKey,
+      })),
+    };
+  }
+
+  /** 已有成员把"为新成员包装好的 DEK"上传给服务端 */
+  async attachDek(
+    userId: string,
+    ledgerId: string,
+    targetUserId: string,
+    dekWrappedBase64: string,
+    dekVersion: number,
+  ) {
+    const self = await this.ensureMembership(userId, ledgerId);
+    if (!self.dekWrapped) {
+      throw new ForbiddenException('你尚未持有该账本密钥，无法授权他人');
+    }
+    if (dekVersion !== self.dekVersion) {
+      throw new BadRequestException('DEK 版本不匹配，请刷新');
+    }
+    const target = await this.prisma.ledgerMember.findUnique({
+      where: { ledgerId_userId: { ledgerId, userId: targetUserId } },
+    });
+    if (!target) throw new NotFoundException('目标成员不在该账本');
+    if (target.dekWrapped) {
+      // 已经被别人 wrap 过了，幂等返回
+      return { message: '已存在', already: true };
+    }
+    await this.prisma.ledgerMember.update({
+      where: { id: target.id },
+      data: {
+        dekWrapped: Buffer.from(dekWrappedBase64, 'base64'),
+        dekVersion,
+      },
+    });
+    return { message: '已授权', already: false };
+  }
+
+  /** 拉取当前用户在所有账本里的 dekWrapped（登录后客户端调一次） */
+  async listMyDeks(userId: string) {
+    const members = await this.prisma.ledgerMember.findMany({
+      where: { userId, dekWrapped: { not: null } },
+      select: {
+        ledgerId: true,
+        dekWrapped: true,
+        dekVersion: true,
+      },
+    });
+    return {
+      deks: members.map((m) => ({
+        ledgerId: m.ledgerId,
+        dekWrapped: m.dekWrapped!.toString('base64'),
+        dekVersion: m.dekVersion,
+      })),
     };
   }
 
@@ -286,8 +385,8 @@ export class LedgersService {
     return ledger;
   }
 
-  /** 工具：为新注册用户创建默认个人账本 */
-  async createPersonalLedger(userId: string) {
+  /** 工具：为新注册用户创建默认个人账本（DEK 由客户端预包装） */
+  async createPersonalLedger(userId: string, dekWrapped: Buffer) {
     return this.prisma.$transaction(async (tx) => {
       const ledger = await tx.ledger.create({
         data: {
@@ -298,7 +397,13 @@ export class LedgersService {
         },
       });
       await tx.ledgerMember.create({
-        data: { ledgerId: ledger.id, userId, role: 'owner' },
+        data: {
+          ledgerId: ledger.id,
+          userId,
+          role: 'owner',
+          dekWrapped,
+          dekVersion: 1,
+        },
       });
       await tx.user.update({
         where: { id: userId },

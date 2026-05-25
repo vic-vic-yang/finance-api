@@ -1,4 +1,13 @@
-import { IsString, IsNumber, IsEnum, IsOptional, IsDateString, Min } from 'class-validator';
+import {
+  IsString,
+  IsNumber,
+  IsEnum,
+  IsOptional,
+  IsDateString,
+  IsBase64,
+  IsInt,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class CreateBillDto {
@@ -16,9 +25,15 @@ export class CreateBillDto {
   @IsString()
   accountId: string;
 
-  @IsOptional()
-  @IsString()
-  note?: string;
+  /** 备注密文（SM4(DEK, iv) ‖ ct ‖ mac），base64。空备注也必须加密一个固定 placeholder */
+  @IsBase64()
+  noteCipher: string;
+
+  /** 加密所用 DEK 版本 */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  noteDekVer: number;
 
   @IsOptional()
   @IsDateString()

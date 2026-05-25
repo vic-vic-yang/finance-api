@@ -1,12 +1,19 @@
 import {
   IsString, IsEnum, IsOptional, IsNumber, IsInt,
-  Min, Max, IsBoolean, IsDateString,
+  Min, Max, IsBoolean, IsDateString, IsBase64,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class CreateAccountDto {
-  @IsString()
-  name: string;
+  /** 账户名密文（SM4(DEK, iv)‖ct‖mac），base64 */
+  @IsBase64()
+  nameCipher: string;
+
+  /** 加密所用 DEK 版本 */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  nameDekVer: number;
 
   @IsEnum(
     [

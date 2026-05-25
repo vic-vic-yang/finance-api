@@ -7,11 +7,17 @@ import { QueryBillDto } from './dto/query-bill.dto';
 
 const BILL_INCLUDE = {
   category: { select: { id: true, name: true, icon: true, color: true } },
-  account: { select: { id: true, name: true, type: true } },
+  account: {
+    select: { id: true, nameCipher: true, nameDekVer: true, type: true },
+  },
   user: { select: { id: true, username: true, nickname: true } },
 };
 
-function shapeBillUser(u: { id: string; username: string; nickname?: string | null } | null | undefined) {
+function shapeBillUser(u: {
+  id: string;
+  username: string;
+  nickname?: string | null;
+} | null | undefined) {
   if (!u) return null;
   const nick = (u.nickname ?? '').trim();
   return {
@@ -58,7 +64,7 @@ export class BillsService {
     ]);
 
     return {
-      bills: bills.map(this.serialize),
+      bills: bills.map((b) => this.serialize(b)),
       pagination: {
         page: Number(page), limit: Number(limit), total,
         totalPages: Math.ceil(total / Number(limit)),
@@ -80,7 +86,6 @@ export class BillsService {
 
   async create(ledgerId: string, userId: string, dto: CreateBillDto) {
     return this.prisma.$transaction(async (tx) => {
-      // 账户：必须是当前用户能用的（共享 或 自己的私人）
       const account = await tx.account.findFirst({
         where: {
           id: dto.accountId,
@@ -90,7 +95,6 @@ export class BillsService {
       });
       if (!account) throw new NotFoundException('账户不存在或无权使用');
 
-      // 分类：账本自建 或 系统分类
       const category = await tx.category.findFirst({
         where: {
           id: dto.categoryId,
@@ -100,6 +104,7 @@ export class BillsService {
       if (!category) throw new NotFoundException('分类不存在');
 
       const amount = new Prisma.Decimal(dto.amount);
+      const noteCipher = Buffer.from(dto.noteCipher, 'base64');
       const bill = await tx.bill.create({
         data: {
           ledgerId,
@@ -108,7 +113,8 @@ export class BillsService {
           categoryId: dto.categoryId,
           type: dto.type as any,
           amount,
-          note: dto.note || '',
+          noteCipher,
+          noteDekVer: dto.noteDekVer,
           date: dto.date ? new Date(dto.date) : new Date(),
         },
         include: BILL_INCLUDE,
@@ -134,7 +140,6 @@ export class BillsService {
       const existing = await tx.bill.findFirst({ where: { id, ledgerId } });
       if (!existing) throw new NotFoundException('账单不存在');
 
-      // 如果改了账户，校验新账户是当前用户能用的
       if (dto.accountId && dto.accountId !== existing.accountId) {
         const newAcc = await tx.account.findFirst({
           where: {
@@ -172,7 +177,10 @@ export class BillsService {
           }),
           ...(dto.categoryId && { categoryId: dto.categoryId }),
           ...(dto.accountId && { accountId: dto.accountId }),
-          ...(dto.note !== undefined && { note: dto.note }),
+          ...(dto.noteCipher !== undefined && {
+            noteCipher: Buffer.from(dto.noteCipher, 'base64'),
+            noteDekVer: dto.noteDekVer ?? existing.noteDekVer,
+          }),
           ...(dto.date && { date: new Date(dto.date) }),
         },
         include: BILL_INCLUDE,
@@ -220,6 +228,20 @@ export class BillsService {
     return {
       ...bill,
       amount: Number(bill.amount),
+      // 密文走 base64（HTTP/JSON 不直接传 BYTEA）
+      noteCipher: bill.noteCipher
+        ? Buffer.from(bill.noteCipher).toString('base64')
+        : null,
+      account: bill.account
+        ? {
+            id: bill.account.id,
+            type: bill.account.type,
+            nameCipher: bill.account.nameCipher
+              ? Buffer.from(bill.account.nameCipher).toString('base64')
+              : null,
+            nameDekVer: bill.account.nameDekVer,
+          }
+        : null,
       user: shapeBillUser(bill.user),
     };
   }

@@ -73,7 +73,8 @@ export class StatsService {
         where: { ledgerId },
         select: {
           id: true,
-          name: true,
+          nameCipher: true,
+          nameDekVer: true,
           type: true,
           balance: true,
           ownerId: true,
@@ -152,7 +153,10 @@ export class StatsService {
         .filter((a) => a.ownerId === null || a.ownerId === userId)
         .map((a) => ({
           id: a.id,
-          name: a.name,
+          nameCipher: a.nameCipher
+            ? Buffer.from(a.nameCipher).toString('base64')
+            : null,
+          nameDekVer: a.nameDekVer,
           type: a.type,
           balance: Number(a.balance),
           ownerId: a.ownerId,

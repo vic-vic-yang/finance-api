@@ -74,4 +74,35 @@ export class LedgersController {
   ) {
     return this.ledgers.removeMember(req.user.id, id, userId);
   }
+
+  // ── E2E 加密专用 ───────────────────────────────────────────
+
+  /** 我在所有账本里的 dekWrapped（登录后客户端调一次） */
+  @Get('keys/mine')
+  listMyDeks(@Request() req) {
+    return this.ledgers.listMyDeks(req.user.id);
+  }
+
+  /** 查询本账本里"还没拿到 DEK"的待授权成员（含其公钥） */
+  @Get(':id/pending-members')
+  pendingMembers(@Request() req, @Param('id') id: string) {
+    return this.ledgers.listPendingMembers(req.user.id, id);
+  }
+
+  /** 已持有 DEK 的成员上传"用 newMember 公钥包装好的 DEK" */
+  @Post(':id/members/:userId/dek')
+  attachDek(
+    @Request() req,
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+    @Body() body: { dekWrapped: string; dekVersion: number },
+  ) {
+    return this.ledgers.attachDek(
+      req.user.id,
+      id,
+      userId,
+      body.dekWrapped,
+      body.dekVersion,
+    );
+  }
 }
