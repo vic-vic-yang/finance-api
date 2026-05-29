@@ -36,6 +36,18 @@ enum LedgerRole {
   member
 }
 
+enum AiImportStatus {
+  pending // 已上传，待处理
+  extracting // 提取文件内容（OCR / 解 CSV / 读 PDF）
+  parsing // LLM 解析中
+  dedupping // 去重中
+  review_ready // 草稿就绪，等客户端拉取加密入库
+  applying // 客户端正在批量加密入库
+  done
+  failed
+  partial // 部分成功
+}
+
 model User {
   id              String         @id @default(cuid())
   username        String         @unique
@@ -50,6 +62,7 @@ model User {
   bills           Bill[] // 创建者，便于追踪是谁记的
   categories      Category[] // 用户自建分类（系统分类 userId=null）
   ownedAccounts   Account[]      @relation("AccountOwner")
+  aiImports       AiImport[]     @relation("UserAiImports")
 
   // ── 国密 SM2 用户密钥对（端到端加密基础）───────────────────
   /// SM2 公钥（hex 字符串，未压缩 04|x|y 共 130 个字符）
@@ -65,20 +78,22 @@ model User {
 }
 
 model Ledger {
-  id         String         @id @default(cuid())
+  id         String          @id @default(cuid())
   name       String
   icon       String? // emoji
   ownerId    String
-  owner      User           @relation("OwnedLedgers", fields: [ownerId], references: [id], onDelete: Cascade)
-  isPersonal Boolean        @default(false) // true=个人默认账本，不可删除/退出
-  createdAt  DateTime       @default(now())
+  owner      User            @relation("OwnedLedgers", fields: [ownerId], references: [id], onDelete: Cascade)
+  isPersonal Boolean         @default(false) // true=个人默认账本，不可删除/退出
+  createdAt  DateTime        @default(now())
   members    LedgerMember[]
   invites    LedgerInvite[]
   accounts   Account[]
   bills      Bill[]
   budgets    Budget[]
   categories Category[]
-  currentFor User[]         @relation("CurrentLedger")
+  currentFor User[]          @relation("CurrentLedger")
+  aiImports  AiImport[]      @relation("LedgerAiImports")
+  recurring  RecurringBill[]
 
   @@index([ownerId])
 }
@@ -118,24 +133,26 @@ model LedgerInvite {
 }
 
 model Account {
-  id         String      @id @default(cuid())
+  id         String          @id @default(cuid())
   ledgerId   String
-  ledger     Ledger      @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  ledger     Ledger          @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
   /// 账户所有者：null = 共享账户（账本内所有成员可用）；非空 = 私人账户（仅本人可见可用）
   ownerId    String?
-  owner      User?       @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  owner      User?           @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   /// 账户名密文（SM4-CBC + SM3-HMAC, iv||ct||mac 一体）。
   /// 服务端永不解密；客户端用账本 DEK 解。
   nameCipher Bytes
   /// 加密时使用的 DEK 版本（用于密钥轮换）
-  nameDekVer Int         @default(1)
+  nameDekVer Int             @default(1)
   type       AccountType
-  balance    Decimal     @default(0) @db.Decimal(15, 2)
+  balance    Decimal         @default(0) @db.Decimal(15, 2)
   icon       String?
   color      String?
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
   bills      Bill[]
+  recurring  RecurringBill[]
+  goals      SavingsGoal[]
 
   // ── 信用卡专用 ─────────────────────────────────────────────
   /// 账单日（1-31）：每月这一天出账
@@ -189,8 +206,9 @@ model Category {
   parent   Category?  @relation("CategoryChildren", fields: [parentId], references: [id], onDelete: Cascade)
   children Category[] @relation("CategoryChildren")
 
-  bills   Bill[]
-  budgets Budget[]
+  bills     Bill[]
+  budgets   Budget[]
+  recurring RecurringBill[]
 
   @@index([ledgerId])
   @@index([parentId])
@@ -220,6 +238,46 @@ model Bill {
   @@index([ledgerId, date(sort: Desc)])
 }
 
+model AiImport {
+  id       String @id @default(cuid())
+  ledgerId String
+  ledger   Ledger @relation("LedgerAiImports", fields: [ledgerId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User   @relation("UserAiImports", fields: [userId], references: [id], onDelete: Cascade)
+
+  // 文件
+  filename String
+  fileType String // image / pdf / csv / xlsx / text
+  fileSize Int
+
+  // 用户上传时选定的目标账户（所有解析出的草稿都入到这个账户）
+  accountId String
+
+  // AI 模型
+  modelName String
+
+  // 状态
+  status   AiImportStatus @default(pending)
+  progress Int            @default(0) // 0-100
+  message  String? // 当前阶段说明或失败原因（简短）
+
+  // 统计
+  parsedCount   Int @default(0) // AI 解析出多少条
+  dupCount      Int @default(0) // 去重跳过多少条
+  insertedCount Int @default(0) // 实际入库多少条
+
+  // 草稿 + 调试（明文暂存，apply 完成后清空）
+  draftsJson String? // JSON 数组：[{ type, amount, categoryName, accountName, note, date }]
+  rawOutput  String? // LLM 原始返回，方便排查
+  errorTrace String? // 失败时的错误信息
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([ledgerId, status])
+}
+
 model Budget {
   id         String       @id @default(cuid())
   ledgerId   String
@@ -233,4 +291,86 @@ model Budget {
   updatedAt  DateTime     @updatedAt
 
   @@index([ledgerId])
+}
+
+/// 周期账单（房租 / 会员订阅 / 话费 ...）
+/// 可由 AI 从历史账单识别（isAuto=true）也可手动添加。
+/// note 加密存储，沿用 Bill 的 noteCipher/noteDekVer 字段命名。
+model RecurringBill {
+  id         String   @id @default(cuid())
+  ledgerId   String
+  ledger     Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+  accountId  String
+  account    Account  @relation(fields: [accountId], references: [id])
+  type       BillType @default(expense)
+  amount     Decimal  @db.Decimal(15, 2)
+  /// 备注密文（同 Bill.noteCipher 格式）
+  noteCipher Bytes?
+  noteDekVer Int?
+  /// monthly | weekly | yearly
+  cycleType  String   @default("monthly")
+  /// 几号（月度）或 周几（周度，1-7）或 mmdd（年度）
+  cycleDay   Int
+  /// 下次触发时间（服务器算）
+  nextDate   DateTime
+  isActive   Boolean  @default(true)
+  /// true = AI 自动发现的候选；用户确认后置 false（变成手动维护）
+  isAuto     Boolean  @default(false)
+  /// 识别置信度 0-1
+  confidence Float?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([ledgerId, isActive])
+  @@index([nextDate])
+}
+
+/// 储蓄目标（独立模块，不属于 AI）。
+/// name 加密；进度通过查询账单实时算（不冗余存储 currentSaved）
+model SavingsGoal {
+  id           String    @id @default(cuid())
+  userId       String
+  ledgerId     String
+  /// 目标名称密文（SM4-CBC + SM3-HMAC, iv||ct||mac）
+  nameCipher   Bytes
+  nameDekVer   Int       @default(1)
+  targetAmount Decimal   @db.Decimal(15, 2)
+  /// 起算日：从这天起的（收入-支出）算作已存（未绑定账户时使用）
+  startDate    DateTime  @default(now())
+  /// 绑定的账户：不为空时用账户余额自动计算进度
+  accountId    String?
+  account      Account?  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  /// 绑定账户时的初始余额快照。为 0 = 计入现有余额；> 0 = 从零开始（只算增量）
+  initialBalance Decimal? @db.Decimal(15, 2)
+  /// 期望达成日（可空）
+  deadline     DateTime?
+  icon         String?
+  color        String?
+  isCompleted  Boolean   @default(false)
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([userId, ledgerId])
+}
+
+/// AI 洞察的"已忽略"记录。
+/// 洞察本身实时计算，不长期持久化；只持久化"用户对某条洞察的忽略状态"。
+/// 同 (type, target) 30 天内不再出现；过期后如果条件仍成立会再次浮出。
+model AiInsightDismissal {
+  id          String   @id @default(cuid())
+  userId      String
+  ledgerId    String
+  /// anomaly_cat | anomaly_bill | budget_alert | recurring_due | trend_up | trend_down ...
+  type        String
+  /// 关联对象 id（categoryId / billId / budgetId / recurringId 等），不同 type 含义不同
+  target      String
+  dismissedAt DateTime @default(now())
+  expireAt    DateTime
+
+  @@unique([userId, ledgerId, type, target])
+  @@index([userId, ledgerId])
+  @@index([expireAt])
 }

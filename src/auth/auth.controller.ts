@@ -15,6 +15,9 @@ import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { RecoverStartDto } from './dto/recover-start.dto';
+import { RecoverFinishDto } from './dto/recover-finish.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -48,5 +51,33 @@ export class AuthController {
   @Patch('me')
   updateMe(@Req() req: any, @Body() dto: UpdateProfileDto) {
     return this.authService.updateProfile(req.user.id, dto);
+  }
+
+  // 修改密码：登录态；客户端已经用新密码 KDF 重新加密了 privKey
+  // 每 IP 每分钟 5 次（密码相关操作收紧）
+  @UseGuards(AuthGuard('jwt'))
+  @Post('change-password')
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @HttpCode(HttpStatus.OK)
+  changePassword(@Req() req: any, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(req.user.id, dto);
+  }
+
+  // 忘密码 第一步：不需要登录，返回 salt + 恢复码密文
+  // 每 IP 每分钟 10 次（防扫用户名 + 防 DoS）
+  @Post('recover/start')
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  @HttpCode(HttpStatus.OK)
+  recoverStart(@Body() dto: RecoverStartDto) {
+    return this.authService.recoverStart(dto);
+  }
+
+  // 忘密码 第二步：服务端验恢复码 + 重置 bcrypt + 发 keyBundle
+  // 每 IP 每分钟 5 次（更严，防爆破恢复码）
+  @Post('recover/finish')
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @HttpCode(HttpStatus.OK)
+  recoverFinish(@Body() dto: RecoverFinishDto) {
+    return this.authService.recoverFinish(dto);
   }
 }

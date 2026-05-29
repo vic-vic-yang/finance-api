@@ -3,14 +3,20 @@ import {
   ConflictException,
   UnauthorizedException,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
+import * as crypto from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgersService } from '../ledgers/ledgers.service';
+import { SmService } from '../crypto/sm.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { RecoverStartDto } from './dto/recover-start.dto';
+import { RecoverFinishDto } from './dto/recover-finish.dto';
 
 /// 统一的"对外用户信息"形状：包含 nickname + displayName（昵称优先回退用户名）
 export function shapeUser(user: {
@@ -37,6 +43,7 @@ export class AuthService {
     private prisma: PrismaService,
     private jwt: JwtService,
     private ledgers: LedgersService,
+    private sm: SmService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -166,6 +173,95 @@ export class AuthService {
         nickname: user.nickname,
         currentLedgerId: user.currentLedgerId,
       }),
+    };
+  }
+
+  /// 改密码：客户端已经用 PBKDF2(新密码, 同 salt) 重新加密了 privKey，
+  /// 服务端只验旧密码 + 更新 bcrypt + sm2PrivByPwd
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('用户不存在');
+
+    const match = await bcrypt.compare(dto.oldPassword, user.password);
+    if (!match) throw new UnauthorizedException('旧密码不正确');
+
+    if (dto.oldPassword === dto.newPassword) {
+      throw new BadRequestException('新密码不能与旧密码相同');
+    }
+
+    const newHash = await bcrypt.hash(dto.newPassword, 12);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        password: newHash,
+        sm2PrivByPwd: Buffer.from(dto.sm2PrivByPwd, 'base64'),
+      },
+    });
+    return { message: '密码已更新' };
+  }
+
+  /// 忘密码第一步：返回 salt + 恢复码加密的 privKey 密文
+  /// 客户端拿到后本地用恢复码解出 privKey，再用新密码重新加密
+  async recoverStart(dto: RecoverStartDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { username: dto.username },
+    });
+    // 防"通过响应推断用户是否存在"——错误信息统一
+    if (!user || !user.kdfSalt || !user.sm2PrivByRecovery) {
+      throw new UnauthorizedException('用户名或恢复码无效');
+    }
+    return {
+      kdfSalt: user.kdfSalt.toString('base64'),
+      sm2PrivByRecovery: user.sm2PrivByRecovery.toString('base64'),
+    };
+  }
+
+  /// 忘密码第二步：服务端验恢复码 → bcrypt 新密码 → 更新 sm2PrivByPwd → 发 token + keyBundle
+  async recoverFinish(dto: RecoverFinishDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { username: dto.username },
+    });
+    if (!user || !user.kdfSalt || !user.recoveryHash) {
+      throw new UnauthorizedException('用户名或恢复码无效');
+    }
+
+    // 服务端校验恢复码：SM3(recoveryCode || kdfSalt) === stored recoveryHash？
+    // 客户端格式化的恢复码是 "AABB-CCDD-EEFF-..." 这种大写，user 输入大小写可能混乱
+    // 这里按原值校验，跟注册时一致即可
+    const recoveryCode = dto.recoveryCode.trim().toUpperCase();
+    const expected = this.sm.sm3(
+      Buffer.concat([Buffer.from(recoveryCode, 'utf8'), user.kdfSalt]),
+    );
+    if (!crypto.timingSafeEqual(expected, user.recoveryHash)) {
+      throw new UnauthorizedException('用户名或恢复码无效');
+    }
+
+    const newHash = await bcrypt.hash(dto.newPassword, 12);
+    const updated = await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: newHash,
+        sm2PrivByPwd: Buffer.from(dto.sm2PrivByPwd, 'base64'),
+      },
+    });
+
+    // 直接发 JWT，让用户免输新密码立刻进 App
+    const token = this.jwt.sign({ userId: updated.id });
+    return {
+      message: '密码已重置，已自动登录',
+      token,
+      user: shapeUser({
+        id: updated.id,
+        username: updated.username,
+        nickname: updated.nickname,
+        currentLedgerId: updated.currentLedgerId,
+      }),
+      keyBundle: {
+        sm2PubKey: updated.sm2PubKey,
+        sm2PrivByPwd: updated.sm2PrivByPwd?.toString('base64') ?? null,
+        sm2PrivByRecovery: updated.sm2PrivByRecovery?.toString('base64') ?? null,
+        kdfSalt: updated.kdfSalt?.toString('base64') ?? null,
+      },
     };
   }
 

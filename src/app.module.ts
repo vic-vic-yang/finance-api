@@ -11,6 +11,10 @@ import { BillsModule } from './bills/bills.module';
 import { BudgetsModule } from './budgets/budgets.module';
 import { StatsModule } from './stats/stats.module';
 import { LedgersModule } from './ledgers/ledgers.module';
+import { AiModule } from './ai/ai.module';
+import { RecurringModule } from './recurring/recurring.module';
+import { InsightsModule } from './insights/insights.module';
+import { GoalsModule } from './goals/goals.module';
 
 @Module({
   imports: [
@@ -29,6 +33,10 @@ import { LedgersModule } from './ledgers/ledgers.module';
     BudgetsModule,
     StatsModule,
     LedgersModule,
+    AiModule,
+    RecurringModule,
+    InsightsModule,
+    GoalsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
