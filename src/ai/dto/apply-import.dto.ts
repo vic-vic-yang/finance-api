@@ -6,6 +6,7 @@ import {
   IsEnum,
   IsInt,
   IsNumber,
+  IsOptional,
   IsString,
   Min,
   ValidateNested,
@@ -36,6 +37,29 @@ export class ApplyBillItemDto {
 
   @IsDateString()
   date: string;
+
+  /** 平台交易订单号，用于同源去重；可空 */
+  @IsString()
+  @IsOptional()
+  externalId?: string;
+
+  /** 来源渠道：alipay / wechat / bank / manual */
+  @IsString()
+  @IsOptional()
+  source?: string;
+}
+
+export class ApplyTransferItemDto {
+  @IsString()
+  fromAccountId: string;
+
+  @IsString()
+  toAccountId: string;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  amount: number;
 }
 
 export class ApplyImportDto {
@@ -43,4 +67,10 @@ export class ApplyImportDto {
   @ValidateNested({ each: true })
   @Type(() => ApplyBillItemDto)
   bills: ApplyBillItemDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ApplyTransferItemDto)
+  transfers?: ApplyTransferItemDto[];
 }

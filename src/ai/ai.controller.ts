@@ -91,7 +91,7 @@ export class AiController {
     @Param('id') id: string,
     @Body() dto: ApplyImportDto,
   ) {
-    return this.ai.applyImport(req.user.id, id, dto.bills);
+    return this.ai.applyImport(req.user.id, id, dto);
   }
 
   @Delete('imports/:id')

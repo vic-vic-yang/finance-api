@@ -8,6 +8,8 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgersService } from '../ledgers/ledgers.service';
+import { AccountsService } from '../accounts/accounts.service';
+import { ApplyImportDto } from './dto/apply-import.dto';
 import { LlmRegistry } from './llm/llm-registry';
 import {
   ChatMessage,
@@ -63,6 +65,7 @@ export class AiService {
     private readonly prisma: PrismaService,
     private readonly ledgers: LedgersService,
     private readonly llmRegistry: LlmRegistry,
+    private readonly accounts: AccountsService,
   ) {}
 
   // ── 列表 / 详情 / 删除 ──────────────────────────────────────
@@ -502,8 +505,9 @@ export class AiService {
   async applyImport(
     userId: string,
     id: string,
-    bills: ApplyBill[],
+    dto: ApplyImportDto,
   ) {
+    const bills = dto.bills;
     const item = await this.prisma.aiImport.findUnique({ where: { id } });
     if (!item) throw new NotFoundException('导入记录不存在');
     if (item.userId !== userId) {
@@ -536,6 +540,8 @@ export class AiService {
               noteCipher: Buffer.from(b.noteCipher, 'base64'),
               noteDekVer: b.noteDekVer,
               date: new Date(b.date),
+              externalId: b.externalId ?? null,
+              source: b.source ?? 'manual',
             },
           }),
           this.prisma.account.update({
@@ -554,14 +560,30 @@ export class AiService {
       }
     }
 
+    // 处理「不计收支」转账行（还款/充值/提现 → 账户间转账）
+    let transferred = 0;
+    for (const t of dto.transfers ?? []) {
+      try {
+        await this.accounts.transfer(item.ledgerId, userId, {
+          fromAccountId: t.fromAccountId,
+          toAccountId: t.toAccountId,
+          amount: t.amount,
+        });
+        transferred++;
+      } catch (e) {
+        this.logger.warn(`transfer apply 失败(跳过): ${e}`);
+      }
+    }
+
     const after = await this.prisma.aiImport.update({
       where: { id },
       data: {
         status: 'done',
         progress: 100,
-        message: bills.length === 0
-          ? '全部与已有账单重复，无需入库'
-          : `已入库 ${inserted}/${bills.length} 条`,
+        message:
+          bills.length === 0 && transferred === 0
+            ? '全部与已有账单重复，无需入库'
+            : `已入库 ${inserted}/${bills.length} 条${transferred ? `，转账 ${transferred} 笔` : ''}`,
         insertedCount: inserted,
         // 应用后清掉明文草稿（保留 rawOutput 方便排查）
         draftsJson: null,
