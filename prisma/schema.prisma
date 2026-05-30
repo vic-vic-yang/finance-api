@@ -232,10 +232,16 @@ model Bill {
   /// 加密所用 DEK 版本
   noteDekVer Int      @default(1)
   date       DateTime
+  /// 平台交易订单号（支付宝/微信），用于同源稳健去重；非平台来源为 null
+  externalId String?
+  /// 来源渠道：alipay / wechat / bank / manual
+  source     String   @default("manual")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@index([ledgerId, date(sort: Desc)])
+  @@index([ledgerId, externalId])
+  @@index([ledgerId, accountId, date])
 }
 
 model AiImport {
