@@ -25,6 +25,7 @@ import { PdfExtractor } from './extractors/pdf.extractor';
 import { CsvExtractor } from './extractors/csv.extractor';
 import { XlsxExtractor } from './extractors/xlsx.extractor';
 import { TextExtractor } from './extractors/text.extractor';
+import { normalizeDirection, dedupDrafts } from './import-dedup';
 
 /** AI 返回的单条草稿（明文，等客户端加密入库）。
  *  categoryId / accountId 在 _process 阶段就解析好，
@@ -37,6 +38,14 @@ export interface AiDraft {
   accountId: string;    // 用户上传时选定，所有草稿共用
   note: string;
   date: string; // ISO 8601
+  /** 收/支方向；transfer = 不计收支（还款/充值/提现）。缺省 expense */
+  direction?: 'expense' | 'income' | 'transfer';
+  /** 平台交易订单号，用于同源去重；可空 */
+  externalId?: string;
+  /** 收/付款方式原始串（如"招商银行储蓄卡(5476)"）；仅草稿用，不入库 */
+  fundingHint?: string;
+  /** 交易对方（transfer 行的 to 端线索）；仅草稿用，不入库 */
+  counterparty?: string;
 }
 
 @Injectable()
@@ -550,7 +559,9 @@ export class AiService {
       data: {
         status: 'done',
         progress: 100,
-        message: `已入库 ${inserted}/${bills.length} 条`,
+        message: bills.length === 0
+          ? '全部与已有账单重复，无需入库'
+          : `已入库 ${inserted}/${bills.length} 条`,
         insertedCount: inserted,
         // 应用后清掉明文草稿（保留 rawOutput 方便排查）
         draftsJson: null,
@@ -655,7 +666,22 @@ export class AiService {
       });
       const dedupResult = await this._dedup(rec0.ledgerId, resolved);
 
-      // 6) 草稿就绪 —— 客户端轮询到此状态会自动加密 note 并 POST apply
+      // 6a) 去重后没有新账单 —— 全部和已有账单重复，无需入库，直接完成。
+      //     （之前这里仍标 review_ready，客户端拿到空草稿会一直空转「入库中」）
+      if (dedupResult.kept.length === 0) {
+        await this._update(id, {
+          status: 'done',
+          progress: 100,
+          message: `解析 ${drafts.list.length} 条，全部与已有账单重复，无需入库`,
+          parsedCount: drafts.list.length,
+          dupCount: dedupResult.skipped,
+          insertedCount: 0,
+          draftsJson: null,
+        });
+        return;
+      }
+
+      // 6b) 草稿就绪 —— 客户端轮询到此状态会自动加密 note 并 POST apply
       await this._update(id, {
         status: 'review_ready',
         progress: 95,
@@ -839,13 +865,15 @@ export class AiService {
         '转账/红包/零钱通 → 转账>转入 或 转账>转出',
         '',
         '【输出格式】',
-        '{"bills":[{"type":"expense"|"income","amount":正数,"categoryName":"一级>二级或一级","note":"商户·商品·摘要（·分隔）","date":"ISO8601"}]}',
+        '{"bills":[{"type":"expense"|"income","direction":"expense"|"income"|"transfer","amount":正数,"categoryName":"一级>二级或一级","note":"商户·商品·摘要（·分隔）","date":"ISO8601","orderId":"交易订单号原样","paymentMethod":"收/付款方式原样","counterparty":"交易对方原样"}]}',
         '',
         '【注意事项】',
         '- 同一笔交易只出一条，不要拆成支出+收入',
         '- 缺金额或缺日期就跳过',
         '- 注意识别退款（商户名含"退款"且金额与消费相反的通常是退款，归入原分类）',
         '- note 写商户名/商品/备注，不要写日期或金额',
+        '- direction：账单的"收/支"列若是"不计收支"(还款/充值/提现/转账)填 transfer；否则按收入/支出填',
+        '- orderId/paymentMethod/counterparty：账单里有就原样照抄，没有就空串；忽略对账单顶部的汇总抬头行',
       ].join('\n'),
     };
 
@@ -893,6 +921,10 @@ export class AiService {
         accountId: '',
         note: String(o?.note || '').trim(),
         date,
+        direction: normalizeDirection(o?.direction ?? o?.['收/支']),
+        externalId: String(o?.orderId || '').trim() || undefined,
+        fundingHint: String(o?.paymentMethod || '').trim() || undefined,
+        counterparty: String(o?.counterparty || '').trim() || undefined,
       });
     }
     const inputCapped =
@@ -911,33 +943,29 @@ export class AiService {
     ledgerId: string,
     drafts: AiDraft[],
   ): Promise<{ kept: AiDraft[]; skipped: number }> {
-    // 同账本下，按 (date 精确到秒, amount) 查现有 bills
-    // 用户说"日期精确到秒已经够"，所以 fingerprint = ledger + date(second) + amount
     if (drafts.length === 0) return { kept: [], skipped: 0 };
+    const extIds = drafts.map((d) => d.externalId).filter(Boolean) as string[];
     const ors: Prisma.BillWhereInput[] = drafts.map((d) => ({
       date: new Date(d.date),
       amount: new Prisma.Decimal(d.amount),
     }));
     const existing = await this.prisma.bill.findMany({
-      where: { ledgerId, OR: ors },
-      select: { date: true, amount: true },
+      where: {
+        ledgerId,
+        OR: [
+          ...(extIds.length ? [{ externalId: { in: extIds } }] : []),
+          ...ors,
+        ],
+      },
+      select: { date: true, amount: true, externalId: true },
     });
-    const existingSet = new Set(
-      existing.map((b) => `${b.date.getTime()}|${b.amount.toString()}`),
+    const existExt = new Set(
+      existing.map((b) => b.externalId).filter(Boolean) as string[],
     );
-    let skipped = 0;
-    const kept: AiDraft[] = [];
-    for (const d of drafts) {
-      const key = `${new Date(d.date).getTime()}|${new Prisma.Decimal(
-        d.amount,
-      ).toString()}`;
-      if (existingSet.has(key)) {
-        skipped++;
-        continue;
-      }
-      kept.push(d);
-    }
-    return { kept, skipped };
+    const existDak = new Set(
+      existing.map((b) => `${b.date.getTime()}|${Number(b.amount)}`),
+    );
+    return dedupDrafts(drafts, existExt, existDak);
   }
 
   /**

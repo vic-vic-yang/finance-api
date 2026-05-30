@@ -1,5 +1,5 @@
 import { parse as csvParse } from 'csv-parse/sync';
-import { Extractor, ExtractedInput, capText } from './extractor';
+import { Extractor, ExtractedInput, capText, decodeText } from './extractor';
 
 /**
  * CSV → markdown 表格字符串（LLM 对 markdown 表格识别率最高）
@@ -10,16 +10,8 @@ export class CsvExtractor implements Extractor {
   }
 
   async extract(buf: Buffer): Promise<ExtractedInput> {
-    // 尝试 utf8，失败回退 gbk（国内导出的 csv 多为 gbk）
-    let text: string;
-    try {
-      text = buf.toString('utf8');
-      // 简单 UTF-8 完整性校验：含 BOM 或不含问号方块即认为 OK
-      if (text.includes('�')) throw new Error('not utf8');
-    } catch {
-      // 回退到 latin1（不丢字节，让 LLM 自己判断）
-      text = buf.toString('latin1');
-    }
+    // 自动识别编码：UTF-8 / GBK·GB18030（支付宝、银行导出几乎都是 GBK）
+    const text = decodeText(buf);
 
     let rows: string[][];
     try {
