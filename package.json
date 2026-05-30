@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "scripts": {
     "build": "nest build",
+    "test": "jest",
     "start": "node dist/main",
     "start:dev": "nest start --watch",
     "prisma:migrate": "prisma migrate dev",
@@ -36,10 +37,13 @@
     "@nestjs/cli": "^10.0.0",
     "@nestjs/schematics": "^10.0.0",
     "@types/bcryptjs": "^3.0.0",
+    "@types/jest": "^30.0.0",
     "@types/multer": "^2.1.0",
     "@types/node": "^20.0.0",
     "@types/passport-jwt": "^4.0.0",
+    "jest": "^30.4.2",
     "prisma": "^5.0.0",
+    "ts-jest": "^29.4.11",
     "ts-node": "^10.9.1",
     "typescript": "^5.1.3"
   }
