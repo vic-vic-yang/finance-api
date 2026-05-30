@@ -28,6 +28,7 @@ import { CsvExtractor } from './extractors/csv.extractor';
 import { XlsxExtractor } from './extractors/xlsx.extractor';
 import { TextExtractor } from './extractors/text.extractor';
 import { normalizeDirection, dedupDrafts } from './import-dedup';
+import { isGatewayPayment, filterGatewayDups } from './gateway-dedup';
 
 /** AI 返回的单条草稿（明文，等客户端加密入库）。
  *  categoryId / accountId 在 _process 阶段就解析好，
@@ -688,15 +689,25 @@ export class AiService {
       });
       const dedupResult = await this._dedup(rec0.ledgerId, resolved);
 
+      // 银行网关跨源去重：仅对"非聚合器自身"的导入跑（聚合器自己的流水不该被网关去重）
+      const isAggregatorImport = /支付宝|alipay|微信|wechat|weixin/i.test(
+        rec0.filename ?? '',
+      );
+      const gw = isAggregatorImport
+        ? { kept: dedupResult.kept, skipped: 0 }
+        : await this._gatewayDedup(rec0.ledgerId, dedupResult.kept);
+      const kept = gw.kept;
+      const totalSkipped = dedupResult.skipped + gw.skipped;
+
       // 6a) 去重后没有新账单 —— 全部和已有账单重复，无需入库，直接完成。
       //     （之前这里仍标 review_ready，客户端拿到空草稿会一直空转「入库中」）
-      if (dedupResult.kept.length === 0) {
+      if (kept.length === 0) {
         await this._update(id, {
           status: 'done',
           progress: 100,
           message: `解析 ${drafts.list.length} 条，全部与已有账单重复，无需入库`,
           parsedCount: drafts.list.length,
-          dupCount: dedupResult.skipped,
+          dupCount: totalSkipped,
           insertedCount: 0,
           draftsJson: null,
         });
@@ -708,10 +719,10 @@ export class AiService {
         status: 'review_ready',
         progress: 95,
         message:
-          `解析 ${drafts.list.length} 条，去重后 ${dedupResult.kept.length} 条，准备入库…`,
+          `解析 ${drafts.list.length} 条，去重后 ${kept.length} 条，准备入库…`,
         parsedCount: drafts.list.length,
-        dupCount: dedupResult.skipped,
-        draftsJson: JSON.stringify(dedupResult.kept),
+        dupCount: totalSkipped,
+        draftsJson: JSON.stringify(kept),
       });
     } catch (e) {
       this.logger.error(`process ${id} 失败: ${e}`);
@@ -988,6 +999,35 @@ export class AiService {
       existing.map((b) => `${b.date.getTime()}|${Number(b.amount)}`),
     );
     return dedupDrafts(drafts, existExt, existDak);
+  }
+
+  /**
+   * 银行网关跨源去重：对"对方含网关词"的草稿，查库里已入库的聚合器账单
+   * (source∈alipay/wechat) 是否有同金额、日期±4 天的；命中则视为重复跳过。
+   */
+  private async _gatewayDedup(
+    ledgerId: string,
+    drafts: AiDraft[],
+  ): Promise<{ kept: AiDraft[]; skipped: number }> {
+    if (drafts.length === 0) return { kept: [], skipped: 0 };
+    const candidates = drafts.filter((d) =>
+      isGatewayPayment(d.note, d.counterparty),
+    );
+    if (candidates.length === 0) return { kept: drafts, skipped: 0 };
+    const WINDOW_DAYS = 4;
+    const times = candidates.map((d) => new Date(d.date).getTime());
+    const minT = Math.min(...times) - WINDOW_DAYS * 86400000;
+    const maxT = Math.max(...times) + WINDOW_DAYS * 86400000;
+    const existingAgg = await this.prisma.bill.findMany({
+      where: {
+        ledgerId,
+        source: { in: ['alipay', 'wechat'] },
+        date: { gte: new Date(minT), lte: new Date(maxT) },
+        amount: { in: candidates.map((d) => new Prisma.Decimal(d.amount)) },
+      },
+      select: { amount: true, date: true },
+    });
+    return filterGatewayDups(drafts, existingAgg, WINDOW_DAYS);
   }
 
   /**
