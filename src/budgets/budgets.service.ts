@@ -160,6 +160,7 @@ export class BudgetsService {
     const where: Prisma.BillWhereInput = {
       ledgerId,
       type: 'expense',
+      isTransfer: false, // 转账不算预算消耗
       date: { gte: start, lte: end },
     };
     if (ids.length) where.categoryId = { in: ids };

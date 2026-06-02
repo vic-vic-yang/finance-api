@@ -1,4 +1,12 @@
-import { IsString, IsNotEmpty, IsNumber, Min, IsOptional } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsNumber,
+  Min,
+  IsOptional,
+  IsBase64,
+  IsInt,
+} from 'class-validator';
 
 export class TransferDto {
   @IsString()
@@ -16,4 +24,19 @@ export class TransferDto {
   @IsString()
   @IsOptional()
   note?: string;
+
+  // ── 转账轨迹流水（可选）──────────────────────────────
+  // 客户端用账本 DEK 加密好的备注密文；提供时服务端会各生成一条
+  // isTransfer 账单（转出 expense / 转入 income），便于查询轨迹、不进收支统计。
+  @IsBase64()
+  @IsOptional()
+  fromNoteCipher?: string;
+
+  @IsBase64()
+  @IsOptional()
+  toNoteCipher?: string;
+
+  @IsInt()
+  @IsOptional()
+  noteDekVer?: number;
 }

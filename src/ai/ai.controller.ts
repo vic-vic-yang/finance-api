@@ -31,10 +31,14 @@ export class AiController {
     private readonly llmRegistry: LlmRegistry,
   ) {}
 
-  /** 列出所有可用模型（前端给用户选） */
+  /** 列出可用模型的能力（不对外暴露具体模型名，只给出数量与是否支持视觉） */
   @Get('models')
   listModels() {
-    return { models: this.llmRegistry.list() };
+    return {
+      models: this.llmRegistry
+        .list()
+        .map((m, i) => ({ id: i + 1, supportsVision: m.supportsVision })),
+    };
   }
 
   /** 列出账本下的导入记录 */

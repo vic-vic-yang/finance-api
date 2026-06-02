@@ -24,6 +24,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.0",
     "csv-parse": "^6.2.1",
+    "iconv-lite": "^0.7.2",
     "multer": "^2.1.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",

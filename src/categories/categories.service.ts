@@ -39,6 +39,51 @@ const SYSTEM_CATEGORIES = [
 
 // 系统二级分类（parentName -> 子项列表）
 const SYSTEM_SUBCATEGORIES: Record<string, Array<{ name: string; icon: string }>> = {
+  // ── 收入 ──
+  工资: [
+    { name: '基本工资', icon: '💵' },
+    { name: '绩效奖金', icon: '📊' },
+    { name: '加班费',   icon: '⏰' },
+    { name: '补贴津贴', icon: '💴' },
+  ],
+  奖金: [
+    { name: '年终奖',   icon: '🎊' },
+    { name: '项目奖金', icon: '🏆' },
+    { name: '提成',     icon: '💹' },
+    { name: '全勤奖',   icon: '✅' },
+  ],
+  兼职副业: [
+    { name: '自由职业', icon: '💻' },
+    { name: '接单外包', icon: '🧾' },
+    { name: '稿费',     icon: '✍️' },
+    { name: '直播带货', icon: '📹' },
+    { name: '摆摊',     icon: '🛒' },
+  ],
+  投资理财: [
+    { name: '股票基金', icon: '📈' },
+    { name: '利息',     icon: '🏦' },
+    { name: '分红',     icon: '💹' },
+    { name: '房租收入', icon: '🏠' },
+    { name: '数字货币', icon: '🪙' },
+  ],
+  报销: [
+    { name: '差旅报销', icon: '🧳' },
+    { name: '餐补',     icon: '🍱' },
+    { name: '交通报销', icon: '🚕' },
+    { name: '医疗报销', icon: '🏥' },
+  ],
+  红包礼金: [
+    { name: '节日红包', icon: '🧧' },
+    { name: '压岁钱',   icon: '🎀' },
+    { name: '份子钱',   icon: '💝' },
+  ],
+  其他收入: [
+    { name: '退款',     icon: '↩️' },
+    { name: '二手变卖', icon: '🏷️' },
+    { name: '中奖',     icon: '🎯' },
+    { name: '意外所得', icon: '✨' },
+  ],
+  // ── 支出 ──
   餐饮: [
     { name: '早餐',     icon: '🥐' },
     { name: '午餐',     icon: '🍱' },
@@ -160,6 +205,11 @@ export class CategoriesService implements OnModuleInit {
   constructor(private prisma: PrismaService) {}
 
   async onModuleInit() {
+    await this.ensureSystemCategories();
+  }
+
+  /** 确保系统分类存在（幂等：缺失时才补种） */
+  private async ensureSystemCategories() {
     // 1. 一级分类种子
     const count = await this.prisma.category.count({
       where: { isSystem: true, parentId: null },
@@ -202,6 +252,9 @@ export class CategoriesService implements OnModuleInit {
 
   /** 返回 系统分类 + 当前账本自建分类（含 parent 信息）
    *
+   *  自愈（self-healing）：每次查询时检查系统一级分类是否存在，
+   *  若缺失则自动补种（应对数据库被 reset 但服务未重启的情况）。
+   *
    *  排序优先级：
    *   1. parentId 升序（一级在前、子分类按父分组）
    *   2. 系统分类在前、用户自建在后（同一父下也是）
@@ -209,6 +262,9 @@ export class CategoriesService implements OnModuleInit {
    *   4. createdAt 升序
    */
   async findAll(ledgerId: string) {
+    // 自愈：若系统分类意外缺失（如 DB reset 后未重启），自动补种
+    await this.ensureSystemCategories();
+
     const categories = await this.prisma.category.findMany({
       where: { OR: [{ isSystem: true }, { ledgerId }] },
       include: { parent: { select: { name: true, icon: true } } },

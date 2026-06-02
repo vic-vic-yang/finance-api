@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsArray,
   IsBase64,
+  IsBoolean,
   IsDateString,
   IsEnum,
   IsInt,
@@ -47,6 +48,11 @@ export class ApplyBillItemDto {
   @IsString()
   @IsOptional()
   source?: string;
+
+  /** 是否为转账拆分出的账单（一收一支）；转账不计入收支统计 */
+  @IsBoolean()
+  @IsOptional()
+  isTransfer?: boolean;
 }
 
 export class ApplyTransferItemDto {

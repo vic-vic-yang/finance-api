@@ -107,6 +107,7 @@ export class InsightsService {
       where: {
         ledgerId,
         type: 'expense',
+        isTransfer: false,
         date: { gte: since },
       },
       include: { category: { select: { name: true, icon: true } } },
@@ -121,6 +122,7 @@ export class InsightsService {
       where: {
         ledgerId,
         type: 'expense',
+        isTransfer: false,
         date: { gte: threeMonthsAgo, lt: since }, // 用更早的当基线
       },
       _avg: { amount: true },
@@ -170,6 +172,7 @@ export class InsightsService {
         where: {
           ledgerId,
           type: 'expense',
+          isTransfer: false,
           date: { gte: thisStart },
         },
         _sum: { amount: true },
@@ -179,6 +182,7 @@ export class InsightsService {
         where: {
           ledgerId,
           type: 'expense',
+          isTransfer: false,
           date: { gte: lastStart, lte: lastEnd },
         },
         _sum: { amount: true },
@@ -248,6 +252,7 @@ export class InsightsService {
         where: {
           ledgerId,
           type: 'expense',
+          isTransfer: false,
           categoryId: { in: ids },
           date: { gte: start, lte: end },
         },

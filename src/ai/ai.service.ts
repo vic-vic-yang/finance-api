@@ -543,6 +543,7 @@ export class AiService {
               date: new Date(b.date),
               externalId: b.externalId ?? null,
               source: b.source ?? 'manual',
+              isTransfer: b.isTransfer ?? false,
             },
           }),
           this.prisma.account.update({
@@ -621,12 +622,12 @@ export class AiService {
       await this._update(id, {
         status: 'parsing',
         progress: 35,
-        message: `调 ${rec0.modelName} 解析中…`,
+        message: `AI 解析中…`,
       });
       const model = this.llmRegistry.get(rec0.modelName);
       if (extracted.kind === 'image' && !model.supportsVision) {
         throw new Error(
-          `图片需要视觉模型，但选了 ${rec0.modelName}（不支持视觉）。请换一个 VL 模型重传。`,
+          `这是图片，需要支持视觉的 AI 才能识别，当前 AI 不支持。请改用支持图片的方式重传。`,
         );
       }
 
@@ -687,7 +688,7 @@ export class AiService {
         progress: 80,
         message: '检查重复…',
       });
-      const dedupResult = await this._dedup(rec0.ledgerId, resolved);
+      const dedupResult = await this._dedup(rec0.ledgerId, resolved, rec0);
 
       // 银行网关跨源去重：仅对"非聚合器自身"的导入跑（聚合器自己的流水不该被网关去重）
       const isAggregatorImport = /支付宝|alipay|微信|wechat|weixin/i.test(
@@ -876,8 +877,12 @@ export class AiService {
         '从银行/支付账单中抽取每一笔交易，严格按 JSON 返回。',
         '',
         '【分类规则】',
-        '你必须从下面的候选分类中选择一个。优先选最精确的二级分类（"一级>二级"），',
-        '实在找不到对应二级时才只填一级名。不要编造分类名，不要填"其他"除非真的无法归类。',
+        '分类一律用"一级>二级"格式。',
+        '1) 一级**必须**从下面候选的一级分类里选最贴切的一个，不要新造一级。',
+        '2) 二级优先从该一级下的候选二级里挑最贴切的。',
+        '3) 只有当候选二级都明显不合适时，才在选定的一级下自拟一个简洁、常见的二级名',
+        '   （2~6字，如"正餐""话费""停车""猫粮"），让它尽量具体、准确。',
+        '4) 严禁笼统地填"其他"——只有当这笔确实无法归入任何一个一级时，才退而用"其他"。',
         '',
         '【支出分类】',
         expenseHier || '（无）',
@@ -942,9 +947,20 @@ export class AiService {
 
     const list: AiDraft[] = [];
     for (const o of arr) {
-      const amount = Number(o?.amount);
-      if (!isFinite(amount) || amount <= 0) continue;
-      const type = o?.type === 'income' ? 'income' : 'expense';
+      const rawAmount = Number(o?.amount);
+      // 拒绝无效金额；零金额也跳过；但允许负数（退款/贷记经常是负数）
+      if (!isFinite(rawAmount) || Math.abs(rawAmount) < 0.01) continue;
+      // 统一取绝对值存储，类型由 direction / type 决定
+      const amount = Math.abs(rawAmount);
+      // type 优先用 direction（账单原始"收/支"列），它是资金来源地
+      // 再 fallback 到 LLM 的 type 判断；都不明确时默认 expense
+      const direction = normalizeDirection(o?.direction ?? o?.['收/支']);
+      const type = direction === 'income'
+        ? 'income'
+        : direction === 'transfer'
+          ? // 转账不计收支，保留 type 让客户端决定走转账路径还是记收支
+            (o?.type === 'income' ? 'income' : 'expense')
+          : o?.type === 'income' ? 'income' : 'expense';
       const date = parseDate(o?.date) ?? new Date().toISOString();
       list.push({
         type,
@@ -954,7 +970,7 @@ export class AiService {
         accountId: '',
         note: String(o?.note || '').trim(),
         date,
-        direction: normalizeDirection(o?.direction ?? o?.['收/支']),
+        direction,
         externalId: String(o?.orderId || '').trim() || undefined,
         fundingHint: String(o?.paymentMethod || '').trim() || undefined,
         counterparty: String(o?.counterparty || '').trim() || undefined,
@@ -975,6 +991,7 @@ export class AiService {
   private async _dedup(
     ledgerId: string,
     drafts: AiDraft[],
+    currentImport?: { id: string; userId: string; filename: string },
   ): Promise<{ kept: AiDraft[]; skipped: number }> {
     if (drafts.length === 0) return { kept: [], skipped: 0 };
     const extIds = drafts.map((d) => d.externalId).filter(Boolean) as string[];
@@ -998,6 +1015,43 @@ export class AiService {
     const existDak = new Set(
       existing.map((b) => `${b.date.getTime()}|${Number(b.amount)}`),
     );
+
+    // 跨文件去重：查询同一账本下其他「尚未入库」的 AI 导入草稿
+    // （防止同时上传多份有重叠的流水时产生重复账单）
+    // 排除当前导入本身，也排除同一用户上传的同一文件名（避免影响测试重新上传）
+    try {
+      const pendingImports = await this.prisma.aiImport.findMany({
+        where: {
+          ledgerId,
+          status: { in: ['review_ready', 'applying'] },
+          draftsJson: { not: null },
+          id: currentImport ? { not: currentImport.id } : undefined,
+        },
+        select: { id: true, userId: true, filename: true, draftsJson: true },
+      });
+      // 在内存中过滤掉同一用户上传的同一文件名（Prisma NOT + 多字段语法不确定，手动过滤）
+      const filtered = currentImport
+        ? pendingImports.filter(
+            (pi) =>
+              !(pi.userId === currentImport.userId &&
+                pi.filename === currentImport.filename),
+          )
+        : pendingImports;
+      for (const pi of filtered) {
+        const pendingDrafts = JSON.parse(pi.draftsJson!) as AiDraft[];
+        for (const pd of pendingDrafts) {
+          if (pd.externalId) {
+            existExt.add(pd.externalId);
+          } else {
+            existDak.add(`${new Date(pd.date).getTime()}|${Number(pd.amount)}`);
+          }
+        }
+      }
+    } catch (e) {
+      // 跨文件去重失败不应阻塞主流程
+      this.logger.warn(`跨文件去重查询失败（跳过）: ${e}`);
+    }
+
     return dedupDrafts(drafts, existExt, existDak);
   }
 
@@ -1096,15 +1150,9 @@ export class AiService {
       }
     }
 
-    // 4. L1 名字精确匹配 → 其下"其他"
-    if (l1Hint) {
-      const l1 = lvl1.find((c) => c.name.toLowerCase() === l1Hint);
-      if (l1) return this._getOrCreateOther(l1.id, type, ledgerId);
-    }
-
-    // 5. L2 模糊（包含/被包含）
+    // 4. L2 模糊（包含/被包含）—— 先尽量复用已有二级，避免重复建
     const needle = l2Hint || raw.toLowerCase();
-    if (needle) {
+    if (needle && !/其[他它]/.test(needle)) {
       const l2 = lvl2.find((c) => {
         const n = c.name.toLowerCase();
         return n.includes(needle) || needle.includes(n);
@@ -1112,24 +1160,83 @@ export class AiService {
       if (l2) return l2.id;
     }
 
-    // 6. L1 模糊 → 其下"其他"
-    if (needle) {
-      const l1 = lvl1.find((c) => {
-        const n = c.name.toLowerCase();
-        return n.includes(needle) || needle.includes(n);
-      });
-      if (l1) return this._getOrCreateOther(l1.id, type, ledgerId);
+    // 5. 一级能定位（精确或模糊）时：
+    //    - AI 给了具体二级名 → 在该一级下「复用相近的，没有就新建」二级，
+    //      而不是一律丢"其他"（满足：没有对应分类就建一个，少用"其他"）
+    //    - 否则才退到该一级的"其他"
+    const l1 = l1Hint
+      ? lvl1.find((c) => c.name.toLowerCase() === l1Hint) ??
+        lvl1.find((c) => {
+          const n = c.name.toLowerCase();
+          return n.includes(l1Hint) || l1Hint.includes(n);
+        })
+      : undefined;
+    if (l1) {
+      const l2Name = parts.length >= 2 ? parts[1] : '';
+      const sub = await this._getOrCreateSubcategory(
+        l1.id,
+        l2Name,
+        type,
+        ledgerId,
+        lvl2,
+        l1.icon,
+      );
+      if (sub) return sub;
+      return this._getOrCreateOther(l1.id, type, ledgerId);
     }
 
-    // 7. 关键词兜底：用 note + aiName 推断分类
+    // 6. 关键词兜底：用 note + aiName 推断分类（一级都没匹配上时）
     const kwCat = this._keywordMatch(all, l1ById, raw, note || '', type);
     if (kwCat) return kwCat;
 
-    // 8. 最终兜底：第一个 L1 → 其他
+    // 7. 最终兜底：第一个 L1 → 其他
     if (lvl1.length > 0) {
       return this._getOrCreateOther(lvl1[0].id, type, ledgerId);
     }
     return all[0].id;
+  }
+
+  /**
+   * 在指定一级下「复用相近的二级 / 没有就新建一个」。
+   * 用于 AI 导入时把交易落到具体二级，而不是统统进"其他"。
+   * 名字非法（太短/太长/是"其他"/纯符号）时返回 null，让调用方退回"其他"。
+   */
+  private async _getOrCreateSubcategory(
+    parentId: string,
+    rawName: string,
+    type: 'expense' | 'income',
+    ledgerId: string,
+    existingL2: { id: string; name: string; parentId: string | null }[],
+    parentIcon?: string | null,
+  ): Promise<string | null> {
+    // 只取最后一段（兼容 AI 仍带 "一级>二级"）
+    const name = (rawName || '')
+      .split(/\s*[>>›/／]\s*/)
+      .pop()!
+      .trim();
+    if (name.length < 2 || name.length > 8) return null;
+    if (/其[他它]/.test(name)) return null;
+    if (!/[一-龥a-zA-Z]/.test(name)) return null; // 必须含中英文，排除纯符号/数字
+    const lower = name.toLowerCase();
+    // 同一级下模糊去重：相近的直接复用，防止分类爆炸
+    const dup = existingL2.find((c) => {
+      if (c.parentId !== parentId) return false;
+      const n = c.name.toLowerCase();
+      return n === lower || n.includes(lower) || lower.includes(n);
+    });
+    if (dup) return dup.id;
+    const created = await this.prisma.category.create({
+      data: {
+        name,
+        type,
+        parentId,
+        ledgerId,
+        icon: parentIcon || '🏷️',
+        isSystem: false,
+      },
+    });
+    this.logger.log(`AI 导入自动新建二级分类「${name}」(parent=${parentId})`);
+    return created.id;
   }
 
   /** 用商户名/备注中的关键词推断分类 */
@@ -1389,7 +1496,7 @@ export class AiService {
     filename: r.filename,
     fileType: r.fileType,
     fileSize: r.fileSize,
-    modelName: r.modelName,
+    // 不对前端暴露具体使用的模型名
     status: r.status,
     progress: r.progress,
     message: r.message,

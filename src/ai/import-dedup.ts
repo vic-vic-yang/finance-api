@@ -1,10 +1,13 @@
 export type Direction = 'expense' | 'income' | 'transfer';
 
-/** 支付宝/微信「收/支」列 → 内部方向。不计收支=转账，其余兜底 expense */
+/** 支付宝/微信「收/支」列 → 内部方向。不计收支=转账，其余兜底 expense
+ *
+ *  同时支持中文（"收入"/"支出"/"不计收支"）和英文（"income"/"expense"/"transfer"）
+ *  输入——中文来自原始账单的"收/支"列，英文来自 LLM 的 direction 字段输出。 */
 export function normalizeDirection(v: string | undefined | null): Direction {
-  const s = (v ?? '').trim();
-  if (s.includes('不计')) return 'transfer';
-  if (s.includes('收入') || s === '收') return 'income';
+  const s = (v ?? '').trim().toLowerCase();
+  if (s.includes('不计') || s === 'transfer') return 'transfer';
+  if (s.includes('收入') || s === '收' || s === 'income') return 'income';
   return 'expense';
 }
 

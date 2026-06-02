@@ -16,7 +16,8 @@ export class StatsService {
     const start = startDate ? new Date(startDate) : null;
     const end = endDate ? new Date(`${endDate}T23:59:59.999`) : null;
 
-    const where: Prisma.BillWhereInput = { ledgerId };
+    // 转账账单（isTransfer）不计入收支统计
+    const where: Prisma.BillWhereInput = { ledgerId, isTransfer: false };
     if (start || end) {
       where.date = {};
       if (start) (where.date as any).gte = start;
@@ -24,7 +25,10 @@ export class StatsService {
     }
 
     // ── 拼接 raw SQL 的 WHERE 子句（使用 Prisma.join 避免 empty 拼接出错）──
-    const conditions: Prisma.Sql[] = [Prisma.sql`b."ledgerId" = ${ledgerId}`];
+    const conditions: Prisma.Sql[] = [
+      Prisma.sql`b."ledgerId" = ${ledgerId}`,
+      Prisma.sql`b."isTransfer" = false`,
+    ];
     if (start) conditions.push(Prisma.sql`b.date >= ${start}`);
     if (end) conditions.push(Prisma.sql`b.date <= ${end}`);
     const whereSql = Prisma.join(conditions, ' AND ');

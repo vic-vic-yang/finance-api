@@ -56,10 +56,11 @@ export class BillsService {
       }),
       this.prisma.bill.count({ where }),
       this.prisma.bill.aggregate({
-        where: { ...where, type: 'income' }, _sum: { amount: true },
+        // 转账账单不计入收支汇总（但仍出现在上面的账单列表里）
+        where: { ...where, type: 'income', isTransfer: false }, _sum: { amount: true },
       }),
       this.prisma.bill.aggregate({
-        where: { ...where, type: 'expense' }, _sum: { amount: true },
+        where: { ...where, type: 'expense', isTransfer: false }, _sum: { amount: true },
       }),
     ]);
 

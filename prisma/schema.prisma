@@ -236,6 +236,8 @@ model Bill {
   externalId String?
   /// 来源渠道：alipay / wechat / bank / manual
   source     String   @default("manual")
+  /// 是否为转账账单（账户间转账拆成的一收一支）。转账不计入收支统计/预算，但在账单列表可见。
+  isTransfer Boolean  @default(false)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 

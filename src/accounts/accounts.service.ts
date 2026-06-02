@@ -218,6 +218,45 @@ export class AccountsService {
       if (!to) throw new NotFoundException('转入账户不存在');
 
       const amount = new Prisma.Decimal(dto.amount);
+
+      // 生成两条可见转账流水（转出 expense / 转入 income，都标 isTransfer），
+      // 便于查询资金轨迹；isTransfer 已在统计/预算里排除，不污染收支。
+      // 备注密文由客户端用账本 DEK 加密后传来（服务端不持有 DEK）。
+      if (dto.fromNoteCipher && dto.toNoteCipher && dto.noteDekVer) {
+        const categoryId = await this.getOrCreateTransferCategory(tx, ledgerId);
+        const now = new Date();
+        await tx.bill.create({
+          data: {
+            ledgerId,
+            userId,
+            accountId: from.id,
+            categoryId,
+            type: 'expense',
+            amount,
+            noteCipher: Buffer.from(dto.fromNoteCipher, 'base64'),
+            noteDekVer: dto.noteDekVer,
+            date: now,
+            source: 'transfer',
+            isTransfer: true,
+          },
+        });
+        await tx.bill.create({
+          data: {
+            ledgerId,
+            userId,
+            accountId: to.id,
+            categoryId,
+            type: 'income',
+            amount,
+            noteCipher: Buffer.from(dto.toNoteCipher, 'base64'),
+            noteDekVer: dto.noteDekVer,
+            date: now,
+            source: 'transfer',
+            isTransfer: true,
+          },
+        });
+      }
+
       const updatedFrom = await tx.account.update({
         where: { id: from.id },
         data: { balance: { decrement: amount } },
@@ -238,6 +277,27 @@ export class AccountsService {
         to: this.serialize(updatedTo),
       };
     });
+  }
+
+  /** 取或建本账本的「转账」分类（转账流水挂靠用；isTransfer 已排除统计，分类仅作展示） */
+  private async getOrCreateTransferCategory(
+    tx: Prisma.TransactionClient,
+    ledgerId: string,
+  ): Promise<string> {
+    const exist = await tx.category.findFirst({
+      where: { ledgerId, name: '转账', parentId: null },
+    });
+    if (exist) return exist.id;
+    const created = await tx.category.create({
+      data: {
+        name: '转账',
+        type: 'expense',
+        ledgerId,
+        icon: '🔄',
+        isSystem: false,
+      },
+    });
+    return created.id;
   }
 
   private async findOneOrFail(ledgerId: string, userId: string, id: string) {
