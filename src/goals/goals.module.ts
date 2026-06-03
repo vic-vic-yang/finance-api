@@ -7,5 +7,6 @@ import { LedgersModule } from '../ledgers/ledgers.module';
   imports: [LedgersModule],
   controllers: [GoalsController],
   providers: [GoalsService],
+  exports: [GoalsService],
 })
 export class GoalsModule {}

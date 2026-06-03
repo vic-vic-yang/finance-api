@@ -15,6 +15,7 @@ import { AiModule } from './ai/ai.module';
 import { RecurringModule } from './recurring/recurring.module';
 import { InsightsModule } from './insights/insights.module';
 import { GoalsModule } from './goals/goals.module';
+import { CfoModule } from './cfo/cfo.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { GoalsModule } from './goals/goals.module';
     RecurringModule,
     InsightsModule,
     GoalsModule,
+    CfoModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
