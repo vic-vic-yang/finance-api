@@ -5,9 +5,9 @@ const MIN_IDLE_BALANCE = 5000;
 const MIN_SUGGEST = 100;
 
 export function detectIdleToGoal(input: DetectorInput): ProposalDraft[] {
-  // 取一个最闲的活钱账户(BANK/VIRTUAL、余额高、久未流出)
+  // 取一个最闲的活钱账户(仅 BANK/VIRTUAL、余额高、久未流出；现金不建议挪去目标)
   const idle = input.accounts
-    .filter((a) => ['BANK', 'VIRTUAL', 'CASH'].includes(a.accountType))
+    .filter((a) => ['BANK', 'VIRTUAL'].includes(a.accountType))
     .filter((a) => a.balance >= MIN_IDLE_BALANCE)
     .filter((a) => (input.lastOutflowDays[a.id] ?? 0) >= IDLE_DAYS)
     .sort((x, y) => y.balance - x.balance)[0];

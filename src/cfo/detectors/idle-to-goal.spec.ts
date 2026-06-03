@@ -39,4 +39,11 @@ describe('detectIdleToGoal', () => {
       lastOutflowDays: { bank: 40 },
     }))).toHaveLength(0);
   });
+  it('CASH 账户不算活钱源(spec: 仅 BANK/VIRTUAL)', () => {
+    expect(detectIdleToGoal(base({
+      accounts: [{ id: 'cash', accountType: 'CASH', balance: 20000 }],
+      goals: [{ id: 'g1', accountId: 'goal-acc', target: 8000, saved: 6500 }],
+      lastOutflowDays: { cash: 40 },
+    }))).toHaveLength(0);
+  });
 });
