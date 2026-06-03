@@ -94,6 +94,7 @@ model Ledger {
   currentFor User[]          @relation("CurrentLedger")
   aiImports  AiImport[]      @relation("LedgerAiImports")
   recurring  RecurringBill[]
+  proposals  Proposal[]
 
   @@index([ownerId])
 }
@@ -381,4 +382,37 @@ model AiInsightDismissal {
   @@unique([userId, ledgerId, type, target])
   @@index([userId, ledgerId])
   @@index([expireAt])
+}
+
+model Proposal {
+  id             String    @id @default(cuid())
+  ledgerId       String
+  ledger         Ledger    @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  type           String
+  status         String    @default("pending") // pending|approved|dismissed|snoozed|done|expired
+  severity       String    @default("warning") // info|warning|critical
+  title          String
+  body           String
+  actionKind     String?
+  actionParams   Json?
+  requiresClient Boolean   @default(false)
+  evidenceRefs   Json?
+  dedupeKey      String
+  createdAt      DateTime  @default(now())
+  decidedAt      DateTime?
+
+  @@unique([ledgerId, dedupeKey])
+  @@index([ledgerId, status])
+}
+
+model ProposalFeedback {
+  id         String    @id @default(cuid())
+  ledgerId   String
+  type       String
+  dismissed  Int       @default(0)
+  approved   Int       @default(0)
+  mutedUntil DateTime?
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([ledgerId, type])
 }
