@@ -288,6 +288,17 @@ export class CfoService {
       }
       return;
     }
+    if (p.actionKind === 'recategorize_bill') {
+      const bill = await this.prisma.bill.findFirst({
+        where: { id: params.billId as string, ledgerId },
+      });
+      if (!bill) throw new BadRequestException('账单已不存在');
+      await this.prisma.bill.update({
+        where: { id: bill.id },
+        data: { categoryId: params.categoryId as string },
+      });
+      return;
+    }
     if (p.actionKind === 'delete_bill') {
       const bill = await this.prisma.bill.findFirst({
         where: { id: params.billId, ledgerId },
