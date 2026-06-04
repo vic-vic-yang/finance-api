@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgersService } from '../ledgers/ledgers.service';
+import { CfoService } from '../cfo/cfo.service';
 import { LlmRegistry } from './llm/llm-registry';
 import {
   ChatMessage,
@@ -32,6 +33,16 @@ export type ReplyCard =
           rate: number;
         }[];
       };
+    }
+  | {
+      type: 'cfo_action';
+      data: {
+        proposalId: string;
+        title: string;
+        body: string;
+        actionKind: string;
+        requiresClient: boolean;
+      };
     };
 
 export interface ChatTurn {
@@ -60,6 +71,7 @@ export class ChatService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledgers: LedgersService,
+    private readonly cfo: CfoService,
     private readonly llmRegistry: LlmRegistry,
   ) {}
 
@@ -198,6 +210,9 @@ export class ChatService {
       }
       if (name === 'manageBudget') {
         return await this._toolManageBudget(ledgerId, args);
+      }
+      if (name === 'adjustBudget') {
+        return await this._toolAdjustBudget(ledgerId, args);
       }
       return { result: { error: `未知工具: ${name}` } };
     } catch (e: any) {
@@ -415,6 +430,59 @@ export class ChatService {
       card: { type: 'budget', data: { items } },
     };
   }
+
+  /** adjustBudget：写操作 → 解析分类名 → 建 CFO 待确认动作 → 回 cfo_action 卡 */
+  private async _toolAdjustBudget(
+    ledgerId: string,
+    args: any,
+  ): Promise<{ result: any; card?: ReplyCard }> {
+    const name = String(args?.categoryName || '').trim();
+    const amount = Number(args?.amount);
+    const period = args?.period === 'YEARLY' ? 'YEARLY' : 'MONTHLY';
+    if (!name || !isFinite(amount) || amount <= 0) {
+      return { result: { error: '缺少分类名或金额无效' } };
+    }
+    // 分类名是明文，服务端可解析。优先二级精确，再一级。
+    const cats = await this.prisma.category.findMany({
+      where: { type: 'expense', OR: [{ ledgerId }, { isSystem: true }] },
+      select: { id: true, name: true, parentId: true },
+    });
+    const cat =
+      cats.find((c) => c.name === name && c.parentId) ||
+      cats.find((c) => c.name === name) ||
+      cats.find((c) => c.name.includes(name));
+    if (!cat) {
+      return { result: { error: `没找到分类「${name}」，请换个说法` } };
+    }
+    const existing = await this.prisma.budget.findFirst({
+      where: { ledgerId, categoryId: cat.id, period },
+    });
+    const proposal = await this.cfo.createChatAction(ledgerId, {
+      actionKind: 'adjust_budget',
+      actionParams: {
+        budgetId: existing?.id,
+        categoryId: cat.id,
+        period,
+        newLimit: amount,
+      },
+      title: `把『${cat.name}』${period === 'YEARLY' ? '年' : '月'}预算设为 ¥${amount}`,
+      body: existing ? '将更新现有预算。' : '该分类还没有预算，将新建。',
+      requiresClient: false,
+    });
+    return {
+      result: { ok: true, message: '已生成待确认动作，等用户在卡片上确认' },
+      card: {
+        type: 'cfo_action',
+        data: {
+          proposalId: proposal.id,
+          title: proposal.title,
+          body: proposal.body,
+          actionKind: proposal.actionKind,
+          requiresClient: proposal.requiresClient,
+        },
+      },
+    };
+  }
 }
 
 // ── 工具规格 (function calling) ─────────────────────────
@@ -473,6 +541,23 @@ const TOOLS: ToolSpec[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'adjustBudget',
+      description:
+        '设置/调整某个分类的预算金额。这是写操作——不会立即生效，会生成一张待用户确认的卡片。用户明确说要"设/调/改预算到某金额"时才用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          categoryName: { type: 'string', description: '分类名，如"餐饮""外卖"' },
+          period: { type: 'string', enum: ['MONTHLY', 'YEARLY'], description: '周期，默认 MONTHLY' },
+          amount: { type: 'number', description: '预算金额（正数，元）' },
+        },
+        required: ['categoryName', 'amount'],
+      },
+    },
+  },
 ];
 
 const SYSTEM_PROMPT = `你是「财记」app 内的财务助手。用户用中文问你账目相关问题，你的工作是：
@@ -484,6 +569,8 @@ const SYSTEM_PROMPT = `你是「财记」app 内的财务助手。用户用中�
 6. 用户问"哪个分类花得多" → groupBy=category
 7. 数据缺失或全是 0 时坦率说"这段时间没找到相关账单"，不要编造
 8. 不要泄露内部工具调用过程，回答里只出现自然语言结果
+9. 写操作（如调预算）只能"提议"：调用对应工具会生成一张待用户确认的卡片，你绝不能声称"已经改好了"；确认与否由用户点卡片决定。回复里说"给你生成了一张确认卡，确认后即生效"之类即可。
+10. 调预算前若分类/金额不清楚，先追问，不要乱猜。
 
 记住：你看不到任何账单备注的明文（端到端加密），所以涉及商户分析时一定要走 groupBy=merchant 让客户端帮你聚合。`;
 
