@@ -9,5 +9,6 @@ import { GoalsModule } from '../goals/goals.module';
   imports: [PrismaModule, BudgetsModule, GoalsModule],
   controllers: [CfoController],
   providers: [CfoService],
+  exports: [CfoService],
 })
 export class CfoModule {}
