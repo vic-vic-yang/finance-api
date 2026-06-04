@@ -214,6 +214,12 @@ export class ChatService {
       if (name === 'adjustBudget') {
         return await this._toolAdjustBudget(ledgerId, args);
       }
+      if (name === 'findBills') {
+        return await this._toolFindBills(ledgerId, args);
+      }
+      if (name === 'recategorizeBill') {
+        return await this._toolRecategorizeBill(ledgerId, args);
+      }
       return { result: { error: `未知工具: ${name}` } };
     } catch (e: any) {
       this.logger.warn(`tool ${name} 失败: ${e?.message}`);
@@ -483,6 +489,102 @@ export class ChatService {
       },
     };
   }
+
+  /** findBills：只读定位账单。只回明文字段，绝不读 noteCipher */
+  private async _toolFindBills(
+    ledgerId: string,
+    args: any,
+  ): Promise<{ result: any }> {
+    const where: any = { ledgerId };
+    if (args?.type === 'expense' || args?.type === 'income') {
+      where.type = args.type;
+    }
+    if (args?.amountMin != null || args?.amountMax != null) {
+      where.amount = {};
+      if (args.amountMin != null) {
+        where.amount.gte = new Prisma.Decimal(String(args.amountMin));
+      }
+      if (args.amountMax != null) {
+        where.amount.lte = new Prisma.Decimal(String(args.amountMax));
+      }
+    }
+    if (args?.dateFrom || args?.dateTo) {
+      where.date = {};
+      if (args.dateFrom) where.date.gte = new Date(args.dateFrom);
+      if (args.dateTo) where.date.lte = new Date(`${args.dateTo}T23:59:59.999`);
+    }
+    const bills = await this.prisma.bill.findMany({
+      where,
+      take: 20,
+      orderBy: { date: 'desc' },
+      select: {
+        id: true,
+        amount: true,
+        date: true,
+        type: true,
+        category: { select: { name: true } },
+      },
+    });
+    return {
+      result: {
+        bills: bills.map((b) => ({
+          id: b.id,
+          amount: Number(b.amount),
+          date: b.date.toISOString().slice(0, 10),
+          type: b.type,
+          categoryName: b.category?.name ?? '其他',
+        })),
+      },
+    };
+  }
+
+  /** recategorizeBill：写操作 → 解析目标分类名 → 建 CFO 待确认动作 → 回 cfo_action 卡 */
+  private async _toolRecategorizeBill(
+    ledgerId: string,
+    args: any,
+  ): Promise<{ result: any; card?: ReplyCard }> {
+    const billId = String(args?.billId || '');
+    const targetName = String(args?.targetCategoryName || '').trim();
+    if (!billId || !targetName) {
+      return { result: { error: '缺少 billId 或目标分类名' } };
+    }
+    const bill = await this.prisma.bill.findFirst({
+      where: { id: billId, ledgerId },
+      select: { id: true, type: true, amount: true, date: true },
+    });
+    if (!bill) return { result: { error: '账单不存在' } };
+    const cats = await this.prisma.category.findMany({
+      where: { type: bill.type, OR: [{ ledgerId }, { isSystem: true }] },
+      select: { id: true, name: true, parentId: true },
+    });
+    const cat =
+      cats.find((c) => c.name === targetName && c.parentId) ||
+      cats.find((c) => c.name === targetName) ||
+      cats.find((c) => c.name.includes(targetName));
+    if (!cat) {
+      return { result: { error: `没找到分类「${targetName}」` } };
+    }
+    const proposal = await this.cfo.createChatAction(ledgerId, {
+      actionKind: 'recategorize_bill',
+      actionParams: { billId: bill.id, categoryId: cat.id },
+      title: `把 ${bill.date.toISOString().slice(0, 10)} 的 ¥${Number(bill.amount)} 改到『${cat.name}』`,
+      body: '将只改这笔的分类。',
+      requiresClient: false,
+    });
+    return {
+      result: { ok: true, message: '已生成待确认动作' },
+      card: {
+        type: 'cfo_action',
+        data: {
+          proposalId: proposal.id,
+          title: proposal.title,
+          body: proposal.body,
+          actionKind: proposal.actionKind,
+          requiresClient: proposal.requiresClient,
+        },
+      },
+    };
+  }
 }
 
 // ── 工具规格 (function calling) ─────────────────────────
@@ -558,6 +660,40 @@ const TOOLS: ToolSpec[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'findBills',
+      description:
+        '按金额/日期/类型查找具体账单（返回 id、金额、日期、分类名；看不到加密备注）。用于在"改某笔分类"前先定位账单。',
+      parameters: {
+        type: 'object',
+        properties: {
+          amountMin: { type: 'number' },
+          amountMax: { type: 'number' },
+          dateFrom: { type: 'string', description: 'YYYY-MM-DD' },
+          dateTo: { type: 'string', description: 'YYYY-MM-DD' },
+          type: { type: 'string', enum: ['expense', 'income'] },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'recategorizeBill',
+      description:
+        '把某条账单改到另一个分类（写操作，生成待确认卡）。billId 必须来自 findBills。',
+      parameters: {
+        type: 'object',
+        properties: {
+          billId: { type: 'string' },
+          targetCategoryName: { type: 'string' },
+        },
+        required: ['billId', 'targetCategoryName'],
+      },
+    },
+  },
 ];
 
 const SYSTEM_PROMPT = `你是「财记」app 内的财务助手。用户用中文问你账目相关问题，你的工作是：
@@ -571,6 +707,7 @@ const SYSTEM_PROMPT = `你是「财记」app 内的财务助手。用户用中�
 8. 不要泄露内部工具调用过程，回答里只出现自然语言结果
 9. 写操作（如调预算）只能"提议"：调用对应工具会生成一张待用户确认的卡片，你绝不能声称"已经改好了"；确认与否由用户点卡片决定。回复里说"给你生成了一张确认卡，确认后即生效"之类即可。
 10. 调预算前若分类/金额不清楚，先追问，不要乱猜。
+11. 用户要"改某笔的分类"时，先用 findBills（按金额/日期）定位；若命中多笔，列出来让用户说清是哪笔，再用 recategorizeBill。
 
 记住：你看不到任何账单备注的明文（端到端加密），所以涉及商户分析时一定要走 groupBy=merchant 让客户端帮你聚合。`;
 
