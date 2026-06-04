@@ -58,7 +58,7 @@ export class CfoService {
     }
 
     const pending = await this.prisma.proposal.findMany({
-      where: { ledgerId, status: 'pending' },
+      where: { ledgerId, status: 'pending', type: { not: 'chat_action' } },
       orderBy: [{ severity: 'desc' }, { createdAt: 'desc' }],
     });
     return pending.map((p) => this.serialize(p));
@@ -186,6 +186,37 @@ export class CfoService {
     };
   }
 
+  /** 对话动作：agent 在聊天里提议一个写操作 → 建一条待确认 Proposal，返回给聊天出卡 */
+  async createChatAction(
+    ledgerId: string,
+    a: {
+      actionKind: string;
+      actionParams: Record<string, unknown>;
+      title: string;
+      body: string;
+      requiresClient: boolean;
+      severity?: string;
+    },
+  ) {
+    const p = await this.prisma.proposal.create({
+      data: {
+        ledgerId,
+        type: 'chat_action',
+        status: 'pending',
+        severity: a.severity ?? 'info',
+        title: a.title,
+        body: a.body,
+        actionKind: a.actionKind,
+        actionParams: a.actionParams as any,
+        requiresClient: a.requiresClient,
+        evidenceRefs: undefined,
+        // 对话动作是临时的、不该被去重合并 → dedupeKey 必须唯一
+        dedupeKey: `chat:${Date.now()}:${Math.round(Math.random() * 1e9)}`,
+      },
+    });
+    return this.serialize(p);
+  }
+
   /** POST /cfo/proposals/:id/decide */
   async decide(
     ledgerId: string,
@@ -220,14 +251,41 @@ export class CfoService {
     const params = (p.actionParams ?? {}) as any;
     if (p.actionKind === 'acknowledge') return; // 仅确认，无副作用
     if (p.actionKind === 'adjust_budget') {
-      const exist = await this.prisma.budget.findFirst({
-        where: { id: params.budgetId, ledgerId },
+      const newLimit = new Prisma.Decimal(String(params.newLimit));
+      if (params.budgetId) {
+        const exist = await this.prisma.budget.findFirst({
+          where: { id: params.budgetId as string, ledgerId },
+        });
+        if (!exist) throw new BadRequestException('预算已变更');
+        await this.prisma.budget.update({
+          where: { id: exist.id },
+          data: { amount: newLimit },
+        });
+        return;
+      }
+      // 没有 budgetId → 按分类+周期 upsert
+      const categoryId = params.categoryId as string | undefined;
+      const period = (params.period as string) || 'MONTHLY';
+      if (!categoryId) throw new BadRequestException('缺少分类');
+      const found = await this.prisma.budget.findFirst({
+        where: { ledgerId, categoryId, period: period as any },
       });
-      if (!exist) throw new BadRequestException('预算已变更');
-      await this.prisma.budget.update({
-        where: { id: params.budgetId },
-        data: { amount: new Prisma.Decimal(String(params.newLimit)) },
-      });
+      if (found) {
+        await this.prisma.budget.update({
+          where: { id: found.id },
+          data: { amount: newLimit },
+        });
+      } else {
+        await this.prisma.budget.create({
+          data: {
+            ledgerId,
+            categoryId,
+            period: period as any,
+            amount: newLimit,
+            startDate: new Date(),
+          },
+        });
+      }
       return;
     }
     if (p.actionKind === 'delete_bill') {
