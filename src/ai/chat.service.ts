@@ -42,6 +42,7 @@ export type ReplyCard =
         body: string;
         actionKind: string;
         requiresClient: boolean;
+        actionParams: Record<string, unknown>;
       };
     };
 
@@ -219,6 +220,9 @@ export class ChatService {
       }
       if (name === 'recategorizeBill') {
         return await this._toolRecategorizeBill(ledgerId, args);
+      }
+      if (name === 'allocateToGoal') {
+        return await this._toolAllocateToGoal(ledgerId, args);
       }
       return { result: { error: `未知工具: ${name}` } };
     } catch (e: any) {
@@ -485,6 +489,7 @@ export class ChatService {
           body: proposal.body,
           actionKind: proposal.actionKind,
           requiresClient: proposal.requiresClient,
+          actionParams: proposal.actionParams,
         },
       },
     };
@@ -581,6 +586,42 @@ export class ChatService {
           body: proposal.body,
           actionKind: proposal.actionKind,
           requiresClient: proposal.requiresClient,
+          actionParams: proposal.actionParams,
+        },
+      },
+    };
+  }
+
+  /** allocateToGoal：写操作 → 账户/目标名是密文，服务端不解析 → 存名字，建 CFO 待确认动作 → 回 cfo_action 卡（客户端解析名字+执行） */
+  private async _toolAllocateToGoal(
+    ledgerId: string,
+    args: any,
+  ): Promise<{ result: any; card?: ReplyCard }> {
+    const fromName = String(args?.fromAccountName || '').trim();
+    const goalName = String(args?.goalName || '').trim();
+    const amount = Number(args?.amount);
+    if (!fromName || !isFinite(amount) || amount <= 0) {
+      return { result: { error: '缺少账户名或金额无效' } };
+    }
+    // 账户名/目标名是密文，服务端不解析 → 存名字，确认时客户端解析
+    const proposal = await this.cfo.createChatAction(ledgerId, {
+      actionKind: 'allocate_to_goal_byname',
+      actionParams: { fromAccountName: fromName, goalName, amount },
+      title: `从『${fromName}』转 ¥${amount} 去${goalName ? `『${goalName}』目标` : '储蓄目标'}`,
+      body: '确认后由你的设备完成带备注的转账。',
+      requiresClient: true,
+    });
+    return {
+      result: { ok: true, message: '已生成待确认动作' },
+      card: {
+        type: 'cfo_action',
+        data: {
+          proposalId: proposal.id,
+          title: proposal.title,
+          body: proposal.body,
+          actionKind: proposal.actionKind,
+          requiresClient: proposal.requiresClient,
+          actionParams: proposal.actionParams,
         },
       },
     };
@@ -691,6 +732,23 @@ const TOOLS: ToolSpec[] = [
           targetCategoryName: { type: 'string' },
         },
         required: ['billId', 'targetCategoryName'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'allocateToGoal',
+      description:
+        '把某账户的闲钱转到某个储蓄目标（写操作，生成待确认卡；实际转账在用户确认时由客户端完成）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          fromAccountName: { type: 'string', description: '转出账户名，如"招商卡"' },
+          goalName: { type: 'string', description: '目标名，如"旅游"' },
+          amount: { type: 'number', description: '金额（元）' },
+        },
+        required: ['fromAccountName', 'amount'],
       },
     },
   },
