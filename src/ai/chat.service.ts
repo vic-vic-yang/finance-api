@@ -44,6 +44,17 @@ export type ReplyCard =
         requiresClient: boolean;
         actionParams: Record<string, unknown>;
       };
+    }
+  | {
+      type: 'bill_draft';
+      data: {
+        amount: number;
+        categoryId: string;
+        categoryName: string;
+        accountName?: string;
+        note: string;
+        billType: 'expense' | 'income';
+      };
     };
 
 export interface ChatTurn {
@@ -223,6 +234,9 @@ export class ChatService {
       }
       if (name === 'allocateToGoal') {
         return await this._toolAllocateToGoal(ledgerId, args);
+      }
+      if (name === 'recordBill') {
+        return await this._toolRecordBill(ledgerId, args);
       }
       return { result: { error: `未知工具: ${name}` } };
     } catch (e: any) {
@@ -626,6 +640,50 @@ export class ChatService {
       },
     };
   }
+
+  /** recordBill：对话记账。绝不建 Proposal、绝不落库（备注明文只随回复卡片传给客户端，
+   *  客户端加密后自行 createBill）。这里只解析明文分类名→id，生成临时草稿卡。*/
+  private async _toolRecordBill(
+    ledgerId: string,
+    args: any,
+  ): Promise<{ result: any; card?: ReplyCard }> {
+    const amount = Number(args?.amount);
+    const name = String(args?.categoryName || '').trim();
+    const billType: 'expense' | 'income' =
+      args?.type === 'income' ? 'income' : 'expense';
+    if (!isFinite(amount) || amount <= 0) {
+      return { result: { error: '金额无效（需为正数）' } };
+    }
+    if (!name) {
+      return { result: { error: '缺少分类名' } };
+    }
+    // 分类名是明文，服务端可解析。优先二级精确，再一级，再模糊。
+    const cats = await this.prisma.category.findMany({
+      where: { type: billType, OR: [{ ledgerId }, { isSystem: true }] },
+      select: { id: true, name: true, parentId: true },
+    });
+    const cat =
+      cats.find((c) => c.name === name && c.parentId) ||
+      cats.find((c) => c.name === name) ||
+      cats.find((c) => c.name.includes(name));
+    if (!cat) {
+      return { result: { error: `没找到分类「${name}」，请换个说法` } };
+    }
+    return {
+      result: { ok: true, message: '已生成账单草稿，等用户确认' },
+      card: {
+        type: 'bill_draft',
+        data: {
+          amount,
+          categoryId: cat.id,
+          categoryName: cat.name,
+          accountName: args?.accountName,
+          note: String(args?.note || ''),
+          billType,
+        },
+      },
+    };
+  }
 }
 
 // ── 工具规格 (function calling) ─────────────────────────
@@ -752,6 +810,32 @@ const TOOLS: ToolSpec[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'recordBill',
+      description:
+        '从自然语言记一笔账（如"记一笔 午饭35""中午湘菜馆180"）。把金额、分类、备注抽出来。这只会生成一张待用户确认的账单草稿卡，不会立即记账保存——确认与否、最终加密入账由用户在客户端完成。',
+      parameters: {
+        type: 'object',
+        properties: {
+          amount: { type: 'number', description: '金额（正数，元）' },
+          categoryName: { type: 'string', description: '分类名，如"餐饮""午饭""交通"' },
+          accountName: {
+            type: 'string',
+            description: '账户名（如"招商卡""微信"）。不清楚就别填，客户端会用默认账户',
+          },
+          note: { type: 'string', description: '备注，如商户名/事由；可空' },
+          type: {
+            type: 'string',
+            enum: ['expense', 'income'],
+            description: '账单类型，默认 expense',
+          },
+        },
+        required: ['amount', 'categoryName'],
+      },
+    },
+  },
 ];
 
 const SYSTEM_PROMPT = `你是「财记」app 内的财务助手。用户用中文问你账目相关问题，你的工作是：
@@ -766,6 +850,7 @@ const SYSTEM_PROMPT = `你是「财记」app 内的财务助手。用户用中�
 9. 写操作（如调预算）只能"提议"：调用对应工具会生成一张待用户确认的卡片，你绝不能声称"已经改好了"；确认与否由用户点卡片决定。回复里说"给你生成了一张确认卡，确认后即生效"之类即可。
 10. 调预算前若分类/金额不清楚，先追问，不要乱猜。
 11. 用户要"改某笔的分类"时，先用 findBills（按金额/日期）定位；若命中多笔，列出来让用户说清是哪笔，再用 recategorizeBill。
+12. 用户说"记一笔/我花了X买了Y"时用 recordBill，把金额/分类/备注抽出来；它只生成待确认草稿卡，不是立即记账；账户不清楚就别填（留空，客户端用默认账户）。
 
 记住：你看不到任何账单备注的明文（端到端加密），所以涉及商户分析时一定要走 groupBy=merchant 让客户端帮你聚合。`;
 
