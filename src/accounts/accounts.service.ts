@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateAccountDto } from './dto/create-account.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 import { TransferDto } from './dto/transfer.dto';
+import { ReconcileDto } from './dto/reconcile.dto';
 
 /// 账户访问规则：
 /// - 共享账户 (ownerId = null)：账本内所有成员都可读、可写、可删
@@ -277,6 +278,85 @@ export class AccountsService {
         to: this.serialize(updatedTo),
       };
     });
+  }
+
+  /**
+   * 校准余额：用户填入真实余额，服务端按 diff 生成一条「余额调整」审计账单
+   * （isTransfer=true，已在统计/预算排除），并把账户余额精确设为真实值。
+   * diff>0 记 income、diff<0 记 expense；备注密文由客户端用账本 DEK 加密后传来。
+   */
+  async reconcile(
+    ledgerId: string,
+    userId: string,
+    id: string,
+    dto: ReconcileDto,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const account = await tx.account.findFirst({
+        where: { id, ledgerId },
+      });
+      if (!account) throw new NotFoundException('账户不存在');
+      this.ensureAccess(account, userId);
+      if (account.type === 'CREDIT' || account.type === 'DEBT') {
+        throw new BadRequestException('信用卡/负债账户暂不支持校准余额');
+      }
+
+      const target = new Prisma.Decimal(String(dto.actualBalance));
+      const diff = target.minus(account.balance);
+      if (diff.isZero()) {
+        return { message: '余额一致，无需校准', account: this.serialize(account) };
+      }
+
+      const categoryId = await this.getOrCreateBalanceAdjustCategory(
+        tx,
+        ledgerId,
+      );
+      await tx.bill.create({
+        data: {
+          ledgerId,
+          userId,
+          accountId: account.id,
+          categoryId,
+          type: diff.gt(0) ? 'income' : 'expense',
+          amount: diff.abs(),
+          noteCipher: Buffer.from(dto.noteCipher ?? '', 'base64'),
+          noteDekVer: dto.noteDekVer ?? 1,
+          date: new Date(),
+          source: 'reconcile',
+          isTransfer: true,
+        },
+      });
+
+      const updated = await tx.account.update({
+        where: { id: account.id },
+        data: { balance: target },
+        include: {
+          owner: { select: { id: true, username: true, nickname: true } },
+        },
+      });
+      return { message: '校准成功', account: this.serialize(updated) };
+    });
+  }
+
+  /** 取或建本账本的「余额调整」分类（校准流水挂靠用；isTransfer 已排除统计，分类仅作展示） */
+  private async getOrCreateBalanceAdjustCategory(
+    tx: Prisma.TransactionClient,
+    ledgerId: string,
+  ): Promise<string> {
+    const exist = await tx.category.findFirst({
+      where: { ledgerId, name: '余额调整', parentId: null },
+    });
+    if (exist) return exist.id;
+    const created = await tx.category.create({
+      data: {
+        name: '余额调整',
+        type: 'expense',
+        ledgerId,
+        icon: '⚖️',
+        isSystem: false,
+      },
+    });
+    return created.id;
   }
 
   /** 取或建本账本的「转账」分类（转账流水挂靠用；isTransfer 已排除统计，分类仅作展示） */

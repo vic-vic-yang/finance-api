@@ -7,6 +7,7 @@ import { AccountsService } from './accounts.service';
 import { CreateAccountDto } from './dto/create-account.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 import { TransferDto } from './dto/transfer.dto';
+import { ReconcileDto } from './dto/reconcile.dto';
 
 @Controller('accounts')
 @UseGuards(AuthGuard('jwt'))
@@ -44,6 +45,17 @@ export class AccountsController {
     return this.accountsService.transfer(
       req.user.currentLedgerId,
       req.user.id,
+      dto,
+    );
+  }
+
+  @Post(':id/reconcile')
+  @HttpCode(HttpStatus.OK)
+  reconcile(@Request() req, @Param('id') id: string, @Body() dto: ReconcileDto) {
+    return this.accountsService.reconcile(
+      req.user.currentLedgerId,
+      req.user.id,
+      id,
       dto,
     );
   }
