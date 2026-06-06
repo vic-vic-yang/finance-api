@@ -416,3 +416,34 @@ model ProposalFeedback {
 
   @@unique([ledgerId, type])
 }
+
+/// 每日财经新闻（全局，非账本相关；公开数据，不涉及加密隐私）。
+/// 由 news 模块抓取 RSS 聚合 + 可选 LLM 排序/中文摘要后入库，按 url 去重。
+model NewsArticle {
+  id          String   @id @default(cuid())
+  title       String
+  /// LLM 翻译的中文标题（列表/详情主标题用）；无 LLM 时回退原标题
+  titleZh     String?
+  /// LLM 中文摘要；无 LLM 时回退 RSS 原始描述
+  summary     String?
+  /// 来源名（CNBC / MarketWatch / 新浪财经 …）
+  source      String
+  /// 原文链接，唯一，用于跨日去重
+  url         String   @unique
+  imageUrl    String?
+  /// 标签：股市 / 宏观 / 加密 / 科技 / 政策 …（LLM 给）
+  category    String?
+  /// 重要性评分 0-100（LLM 给，用于排序）；无 LLM 时按时间
+  importance  Int      @default(0)
+  /// 情绪：positive / neutral / negative（可选）
+  sentiment   String?
+  /// 抓取的原文正文（纯文本，懒加载：用户打开详情时才抓）
+  content     String?
+  /// LLM 基于正文提炼的要点分析（懒加载，打开详情时生成并缓存）
+  analysis    String?
+  publishedAt DateTime
+  fetchedAt   DateTime @default(now())
+
+  @@index([publishedAt])
+  @@index([importance])
+}

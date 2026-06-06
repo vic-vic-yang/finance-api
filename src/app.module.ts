@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import { PrismaModule } from './prisma/prisma.module';
 import { CryptoModule } from './crypto/crypto.module';
@@ -16,6 +17,8 @@ import { RecurringModule } from './recurring/recurring.module';
 import { InsightsModule } from './insights/insights.module';
 import { GoalsModule } from './goals/goals.module';
 import { CfoModule } from './cfo/cfo.module';
+import { ToolsModule } from './tools/tools.module';
+import { NewsModule } from './news/news.module';
 
 @Module({
   imports: [
@@ -25,6 +28,7 @@ import { CfoModule } from './cfo/cfo.module';
     ThrottlerModule.forRoot([
       { name: 'default', ttl: 60_000, limit: 60 },
     ]),
+    ScheduleModule.forRoot(),
     PrismaModule,
     CryptoModule,
     AuthModule,
@@ -39,6 +43,8 @@ import { CfoModule } from './cfo/cfo.module';
     InsightsModule,
     GoalsModule,
     CfoModule,
+    ToolsModule,
+    NewsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
