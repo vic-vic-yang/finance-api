@@ -94,6 +94,7 @@ model Ledger {
   currentFor User[]          @relation("CurrentLedger")
   aiImports  AiImport[]      @relation("LedgerAiImports")
   recurring  RecurringBill[]
+  proposals  Proposal[]
 
   @@index([ownerId])
 }
@@ -381,4 +382,102 @@ model AiInsightDismissal {
   @@unique([userId, ledgerId, type, target])
   @@index([userId, ledgerId])
   @@index([expireAt])
+}
+
+model Proposal {
+  id             String    @id @default(cuid())
+  ledgerId       String
+  ledger         Ledger    @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  type           String
+  status         String    @default("pending") // pending|approved|dismissed|snoozed|done|expired
+  severity       String    @default("warning") // info|warning|critical
+  title          String
+  body           String
+  actionKind     String?
+  actionParams   Json?
+  requiresClient Boolean   @default(false)
+  evidenceRefs   Json?
+  dedupeKey      String
+  createdAt      DateTime  @default(now())
+  decidedAt      DateTime?
+
+  @@unique([ledgerId, dedupeKey])
+  @@index([ledgerId, status])
+}
+
+model ProposalFeedback {
+  id         String    @id @default(cuid())
+  ledgerId   String
+  type       String
+  dismissed  Int       @default(0)
+  approved   Int       @default(0)
+  mutedUntil DateTime?
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([ledgerId, type])
+}
+
+/// 每日财经新闻（全局，非账本相关；公开数据，不涉及加密隐私）。
+/// 由 news 模块抓取 RSS 聚合 + 可选 LLM 排序/中文摘要后入库，按 url 去重。
+model NewsArticle {
+  id          String   @id @default(cuid())
+  title       String
+  /// LLM 翻译的中文标题（列表/详情主标题用）；无 LLM 时回退原标题
+  titleZh     String?
+  /// LLM 中文摘要；无 LLM 时回退 RSS 原始描述
+  summary     String?
+  /// 来源名（CNBC / MarketWatch / 新浪财经 …）
+  source      String
+  /// 原文链接，唯一，用于跨日去重
+  url         String   @unique
+  imageUrl    String?
+  /// 标签：股市 / 宏观 / 加密 / 科技 / 政策 …（LLM 给）
+  category    String?
+  /// 重要性评分 0-100（LLM 给，用于排序）；无 LLM 时按时间
+  importance  Int      @default(0)
+  /// 情绪：positive / neutral / negative（可选）
+  sentiment   String?
+  /// 抓取的原文正文（纯文本，懒加载：用户打开详情时才抓）
+  content     String?
+  /// LLM 基于正文提炼的要点分析（懒加载，打开详情时生成并缓存）
+  analysis    String?
+  publishedAt DateTime
+  fetchedAt   DateTime @default(now())
+
+  @@index([publishedAt])
+  @@index([importance])
+}
+
+/// 用户查询过的股票分析快照（按用户隔离）。每次查询/更新存一条，
+/// 列表按 symbol 取最新一条；分析时参考上一条做对比。公开行情数据，不加密。
+model StockAnalysis {
+  id        String   @id @default(cuid())
+  userId    String
+  symbol    String
+  name      String?
+  nameZh    String?
+  /// 查询时的关键指标快照（价格/市值/PE/评级/目标价…）
+  quote     Json
+  /// LLM 分析文本
+  analysis  String?
+  /// 相关新闻快照
+  news      Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, symbol, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// 用户的股票持仓（每用户每股票一条），用于算总收益/当日收益。
+model StockHolding {
+  id        String   @id @default(cuid())
+  userId    String
+  symbol    String
+  /// 买入均价
+  buyPrice  Float
+  /// 持有数量（股）
+  shares    Float
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, symbol])
 }
