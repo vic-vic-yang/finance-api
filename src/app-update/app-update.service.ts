@@ -40,7 +40,7 @@ export class AppUpdateService {
     if (!fs.existsSync(apk)) throw new NotFoundException('安装包文件不存在');
     res.set({
       'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': `attachment; filename="caiji-${info.buildNumber}.apk"`,
+      'Content-Disposition': `attachment; filename="${info.apkFile}"`,
     });
     return new StreamableFile(fs.createReadStream(apk));
   }
