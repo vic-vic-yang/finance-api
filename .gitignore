@@ -3,3 +3,6 @@ dist/
 .env
 *.env.local
 .env.production
+
+# App 升级安装包（大文件，不入库）
+app-release/

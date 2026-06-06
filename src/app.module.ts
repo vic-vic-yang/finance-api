@@ -19,6 +19,7 @@ import { GoalsModule } from './goals/goals.module';
 import { CfoModule } from './cfo/cfo.module';
 import { ToolsModule } from './tools/tools.module';
 import { NewsModule } from './news/news.module';
+import { AppUpdateModule } from './app-update/app-update.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { NewsModule } from './news/news.module';
     CfoModule,
     ToolsModule,
     NewsModule,
+    AppUpdateModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

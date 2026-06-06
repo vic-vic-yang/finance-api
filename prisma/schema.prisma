@@ -447,3 +447,37 @@ model NewsArticle {
   @@index([publishedAt])
   @@index([importance])
 }
+
+/// 用户查询过的股票分析快照（按用户隔离）。每次查询/更新存一条，
+/// 列表按 symbol 取最新一条；分析时参考上一条做对比。公开行情数据，不加密。
+model StockAnalysis {
+  id        String   @id @default(cuid())
+  userId    String
+  symbol    String
+  name      String?
+  nameZh    String?
+  /// 查询时的关键指标快照（价格/市值/PE/评级/目标价…）
+  quote     Json
+  /// LLM 分析文本
+  analysis  String?
+  /// 相关新闻快照
+  news      Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, symbol, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// 用户的股票持仓（每用户每股票一条），用于算总收益/当日收益。
+model StockHolding {
+  id        String   @id @default(cuid())
+  userId    String
+  symbol    String
+  /// 买入均价
+  buyPrice  Float
+  /// 持有数量（股）
+  shares    Float
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, symbol])
+}
