@@ -4,13 +4,14 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Request,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { LoansService } from './loans.service';
-import { CreateLoanDto, RepayLoanDto } from './loans.dto';
+import { CreateLoanDto, RepayLoanDto, UpdateLoanDto } from './loans.dto';
 
 @Controller('loans')
 @UseGuards(AuthGuard('jwt'))
@@ -39,6 +40,12 @@ export class LoansController {
   @Post(':id/repay')
   repay(@Request() req, @Param('id') id: string, @Body() dto: RepayLoanDto) {
     return this.loans.repay(req.user.currentLedgerId, req.user.id, id, dto);
+  }
+
+  /** PATCH /api/loans/:id —— 编辑金额/备注/日期/凭证 */
+  @Patch(':id')
+  update(@Request() req, @Param('id') id: string, @Body() dto: UpdateLoanDto) {
+    return this.loans.update(req.user.currentLedgerId, id, dto);
   }
 
   /** DELETE /api/loans/:id */

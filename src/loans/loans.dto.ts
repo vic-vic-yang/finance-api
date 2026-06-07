@@ -35,6 +35,29 @@ export class CreateLoanDto {
   date?: string; // ISO
 }
 
+export class UpdateLoanDto {
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  amount?: number;
+
+  @IsOptional()
+  @IsString()
+  noteCipher?: string; // base64
+
+  @IsOptional()
+  @IsNumber()
+  noteDekVer?: number;
+
+  @IsOptional()
+  @IsString()
+  voucherKey?: string;
+
+  @IsOptional()
+  @IsString()
+  date?: string; // ISO
+}
+
 export class RepayLoanDto {
   @IsNumber()
   @Min(0.01)

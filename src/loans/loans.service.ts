@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateLoanDto, RepayLoanDto } from './loans.dto';
+import { CreateLoanDto, RepayLoanDto, UpdateLoanDto } from './loans.dto';
 
 /**
  * 借贷往来：借出(lend/应收) 或 借入(borrow/应付)。
@@ -168,6 +168,33 @@ export class LoansService {
       });
       return this.ser(updated);
     });
+  }
+
+  /**
+   * 编辑借贷记录的元信息：金额 / 备注 / 日期 / 凭证。
+   * 与删除一致——只改记录本身，不回溯改写已生成的账户流水/余额（历史轨迹保留）。
+   * 金额变化会重算是否结清。方向与关联账户不可改（要改请删后重记）。
+   */
+  async update(ledgerId: string, id: string, dto: UpdateLoanDto) {
+    const loan = await this.prisma.loan.findFirst({ where: { id, ledgerId } });
+    if (!loan) throw new NotFoundException('借贷记录不存在');
+
+    const data: any = {};
+    if (dto.amount != null) {
+      const amount = new Prisma.Decimal(dto.amount);
+      data.amount = amount;
+      // 金额变了 → 按已还金额重算结清状态
+      data.settledAt = loan.repaidAmount.gte(amount)
+        ? loan.settledAt ?? new Date()
+        : null;
+    }
+    if (dto.noteCipher !== undefined) data.noteCipher = dto.noteCipher || null;
+    if (dto.noteDekVer != null) data.noteDekVer = dto.noteDekVer;
+    if (dto.voucherKey !== undefined) data.voucherKey = dto.voucherKey || null;
+    if (dto.date) data.date = new Date(dto.date);
+
+    const updated = await this.prisma.loan.update({ where: { id }, data });
+    return this.ser(updated);
   }
 
   /** 删除借贷记录（仅删记录，不回滚已生成的账单/余额——历史轨迹保留） */

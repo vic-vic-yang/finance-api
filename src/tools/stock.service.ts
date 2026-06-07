@@ -599,12 +599,18 @@ export class StockService {
   }
 
   // ── 持仓 ──────────────────────────────────────────────────
-  /** 设置/更新持仓；买入价或数量 ≤0 视为清空持仓 */
+  /**
+   * 设置/更新持仓；买入价或数量 ≤0 视为清空持仓。
+   * 可选关联账本+账户：关联后每天 15:00 自动按最新价更新账户余额、记当日盈亏。
+   * 关联或换账户时，用当前实时价作为基准(lastPrice)，这样首次结算只记关联之后的波动，
+   * 不会把"买入至今"的累计盈亏一次性灌进账户。
+   */
   async setHolding(
     userId: string,
     symbol: string,
     buyPrice: number,
     shares: number,
+    opts?: { ledgerId?: string | null; accountId?: string | null },
   ) {
     const sym = symbol.toUpperCase();
     if (!(buyPrice > 0) || !(shares > 0)) {
@@ -613,19 +619,58 @@ export class StockService {
       });
       return { holding: null };
     }
+
+    const prev = await this.prisma.stockHolding.findUnique({
+      where: { userId_symbol: { userId, symbol: sym } },
+    });
+    const accountId = opts?.accountId ?? null;
+    const ledgerId = opts?.ledgerId ?? null;
+
+    // 账户变化（首次关联 / 换账户）→ 重建价格基准
+    const accountChanged = (prev?.accountId ?? null) !== accountId;
+    let lastPrice = prev?.lastPrice ?? null;
+    let lastCalcAt = prev?.lastCalcAt ?? null;
+    if (accountId && accountChanged) {
+      const live = await this.fetchLivePrice(sym).catch(() => null);
+      lastPrice = live?.price ?? null;
+      lastCalcAt = lastPrice != null ? new Date() : null;
+    }
+    if (!accountId) {
+      // 取消关联：清掉结算基准
+      lastPrice = null;
+      lastCalcAt = null;
+    }
+
     const h = await this.prisma.stockHolding.upsert({
       where: { userId_symbol: { userId, symbol: sym } },
-      create: { userId, symbol: sym, buyPrice, shares },
-      update: { buyPrice, shares },
+      create: {
+        userId,
+        symbol: sym,
+        buyPrice,
+        shares,
+        ledgerId,
+        accountId,
+        lastPrice,
+        lastCalcAt,
+      },
+      update: { buyPrice, shares, ledgerId, accountId, lastPrice, lastCalcAt },
     });
-    return { holding: { buyPrice: h.buyPrice, shares: h.shares } };
+    return {
+      holding: {
+        buyPrice: h.buyPrice,
+        shares: h.shares,
+        accountId: h.accountId,
+      },
+    };
   }
 
   private async getHolding(userId: string, symbol: string) {
     const h = await this.prisma.stockHolding.findUnique({
       where: { userId_symbol: { userId, symbol: symbol.toUpperCase() } },
     });
-    return h ? { buyPrice: h.buyPrice, shares: h.shares } : null;
+    return h
+      ? { buyPrice: h.buyPrice, shares: h.shares, accountId: h.accountId }
+      : null;
   }
 
   /** 列表：该用户每只股票的最新一条快照（轻量字段） */

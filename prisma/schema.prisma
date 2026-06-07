@@ -504,6 +504,14 @@ model StockHolding {
   buyPrice  Float
   /// 持有数量（股）
   shares    Float
+  /// 关联账本（建账单/找账户用）。null = 未关联，不自动结算
+  ledgerId  String?
+  /// 关联账户（投资类）：每日按最新价更新其余额、记当日盈亏流水
+  accountId String?
+  /// 上次结算用的价格（算当日 delta 的基准）。null = 尚未建立基准
+  lastPrice Float?
+  /// 上次成功结算的时间（幂等/补算判断：同一天只算一次）
+  lastCalcAt DateTime?
   updatedAt DateTime @updatedAt
 
   @@unique([userId, symbol])
