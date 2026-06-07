@@ -468,6 +468,33 @@ model StockAnalysis {
   @@index([userId, createdAt])
 }
 
+/// 借贷往来：借出(别人欠我/应收) 或 借入(我欠别人/应付)。本金走转账类账单不计收支。
+/// 对方信息只在备注里（端到端加密），不单独建账户。
+model Loan {
+  id           String    @id @default(cuid())
+  ledgerId     String
+  userId       String
+  /// 'lend'=借出(应收) | 'borrow'=借入(应付)
+  direction    String
+  amount       Decimal   @db.Decimal(15, 2)
+  /// 已还/已收金额
+  repaidAmount Decimal   @default(0) @db.Decimal(15, 2)
+  /// 出/入款账户（可空）
+  accountId    String?
+  /// 备注密文（base64，账本 DEK 加密）
+  noteCipher   String?
+  noteDekVer   Int       @default(1)
+  /// 凭证图片 key
+  voucherKey   String?
+  date         DateTime
+  /// 结清时间（已还=本金时置上）
+  settledAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([ledgerId, direction, settledAt])
+  @@index([ledgerId, createdAt])
+}
+
 /// 用户的股票持仓（每用户每股票一条），用于算总收益/当日收益。
 model StockHolding {
   id        String   @id @default(cuid())
