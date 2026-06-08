@@ -174,6 +174,15 @@ export class StockService {
     return null;
   }
 
+  /**
+   * 涨跌幅：Yahoo 的 regularMarketChangePercent 是「小数比例」(0.03 = 3%)，
+   * 这里统一 ×100 转成「百分数」(3)，前端直接当百分比显示，避免出现 0.03%。
+   */
+  private numPct(o: any): number | null {
+    const v = this.num(o);
+    return v == null ? null : v * 100;
+  }
+
   /** 轻量实时价（只取 price 模块），进详情时刷新用于算盈亏 */
   async fetchLivePrice(symbol: string): Promise<{
     price: number | null;
@@ -191,7 +200,7 @@ export class StockService {
       return {
         price: this.num(p.regularMarketPrice),
         change: this.num(p.regularMarketChange),
-        changePercent: this.num(p.regularMarketChangePercent),
+        changePercent: this.numPct(p.regularMarketChangePercent),
         currency: p.currency || '',
       };
     } catch {
@@ -223,7 +232,7 @@ export class StockService {
       currency: p.currency || '',
       price: this.num(p.regularMarketPrice),
       change: this.num(p.regularMarketChange),
-      changePercent: this.num(p.regularMarketChangePercent),
+      changePercent: this.numPct(p.regularMarketChangePercent),
       marketCap: this.num(p.marketCap),
       dayHigh: this.num(p.regularMarketDayHigh),
       dayLow: this.num(p.regularMarketDayLow),
