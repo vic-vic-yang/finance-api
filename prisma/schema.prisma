@@ -519,3 +519,50 @@ model StockHolding {
 
   @@unique([userId, symbol])
 }
+
+/// 每日选股运行记录（一交易日一条）：强势板块 + 市场解读
+model DailyPickRun {
+  id        String   @id @default(cuid())
+  tradeDate String   @unique // yyyy-MM-dd
+  boards    String // JSON: [{name, pct, amount, lead}] 强势板块
+  comment   String? // 市场/板块解读（LLM）
+  picks     DailyPick[]
+  createdAt DateTime @default(now())
+}
+
+/// 每日机会股（每交易日 Top N）
+model DailyPick {
+  id            String   @id @default(cuid())
+  tradeDate     String // yyyy-MM-dd
+  runId         String
+  run           DailyPickRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  rank          Int // 1..N
+  code          String // 6 位代码
+  symbol        String // 带市场前缀，如 sh600176
+  name          String
+  boardName     String // 所属强势板块
+  price         Float?
+  changePercent Float?
+  pe            Float?
+  pb            Float?
+  score         Int // AI 机会评分 0-100
+  action        String // 合规措辞：重点关注/逢低关注/观望 等
+  reason        String // 入选理由
+  risk          String // 主要风险
+  // —— 复盘：推荐后用最新价回测的实际表现（学习闭环用）——
+  lastPrice     Float? // 最近一次评估时的价
+  outcomePct    Float? // 自推荐以来累计收益 %
+  outcomeAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  @@unique([tradeDate, code])
+  @@index([tradeDate, rank])
+}
+
+/// 选股 agent 的「记忆」：自我进化的策略备忘 + 最近战绩快照（单行，每日更新）
+model PicksMemory {
+  id        String   @id @default("default")
+  playbook  String   @default("") // 累积的经验/策略(LLM 每日复盘后更新)
+  stats     String? // JSON: 样本数/胜率/平均收益/分动作命中等
+  updatedAt DateTime @updatedAt
+}

@@ -22,6 +22,7 @@ import { NewsModule } from './news/news.module';
 import { AppUpdateModule } from './app-update/app-update.module';
 import { LoansModule } from './loans/loans.module';
 import { UploadsModule } from './uploads/uploads.module';
+import { PicksModule } from './picks/picks.module';
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { UploadsModule } from './uploads/uploads.module';
     AppUpdateModule,
     LoansModule,
     UploadsModule,
+    PicksModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
