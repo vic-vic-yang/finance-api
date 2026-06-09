@@ -512,6 +512,9 @@ model StockHolding {
   lastPrice Float?
   /// 上次成功结算的时间（幂等/补算判断：同一天只算一次）
   lastCalcAt DateTime?
+  /// 每日 AI 持仓决策（JSON: {action, reason}），随每日结算生成
+  advice    String?
+  adviceAt  DateTime?
   updatedAt DateTime @updatedAt
 
   @@unique([userId, symbol])

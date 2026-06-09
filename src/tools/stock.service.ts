@@ -673,37 +673,113 @@ export class StockService {
     };
   }
 
+  /**
+   * 每日持仓决策分析：把「我的持仓 + 股票数据」喂给 LLM，扮演资深分析师给出
+   * 加仓/持有/减仓/清仓/观望 的明确建议与理由。供每日结算时调用、存库。
+   */
+  async analyzeHoldingDecision(
+    symbol: string,
+    holding: { buyPrice: number; shares: number; currentPrice?: number | null },
+  ): Promise<{ action: string; reason: string } | null> {
+    const modelName = this.llms.defaultTextModelName();
+    if (!modelName) return null;
+    const quote = await this.fetchQuote(symbol).catch(() => null);
+    if (!quote) return null;
+    const cur = holding.currentPrice ?? quote.price ?? null;
+    const cost = holding.buyPrice;
+    const plPct =
+      cur != null && cost > 0
+        ? (((cur - cost) / cost) * 100).toFixed(2)
+        : '—';
+    const mktValue = cur != null ? (cur * holding.shares).toFixed(2) : '—';
+    const facts = [
+      `名称：${quote.name}(${quote.symbol})  币种：${quote.currency}`,
+      `现价：${cur}  市值：${quote.marketCap}  市盈率：${quote.pe}  预期PE：${quote.forwardPe}  市净率：${quote.pb}  PEG：${quote.peg}`,
+      `EPS：${quote.eps}  ROE：${quote.roe}  利润率：${quote.profitMargins}  营收增速：${quote.revenueGrowth}`,
+      `52周高/低：${quote.high52}/${quote.low52}  50/200日均线：${quote.ma50}/${quote.ma200}`,
+      `分析师评级：${quote.recommendation}(${quote.analystCount}人)  目标价 低/均/高：${quote.targetLow}/${quote.targetMean}/${quote.targetHigh}`,
+      `行业：${quote.sector} / ${quote.industry}`,
+    ].join('\n');
+    const holdingLine = `\n\n【我的持仓】成本价 ${cost}，持有 ${holding.shares} 股，现价 ${cur}，持仓市值约 ${mktValue}，浮动盈亏约 ${plPct}%。`;
+    const system =
+      '你是资深证券分析师，正在为客户做每日持仓复盘。基于给定数据用中文分析，严格只返回 JSON：' +
+      '{"action":"从【加仓/持有/减仓/清仓/观望】里选一个最贴切的","reason":"针对该持仓的决策理由：结合成本与当前盈亏、估值水平、分析师目标价空间、主要风险，150字内，最后一句「⚠️ 仅供参考，不构成投资建议」"}。' +
+      '客观、只依据所给数据，不编造数字。';
+    try {
+      const res = await this.llms.get(modelName).chat(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: facts + holdingLine },
+        ],
+        { responseFormat: 'json_object', temperature: 0.3, maxTokens: 1200 },
+      );
+      const j = parseJsonLoose(res.content || '') || {};
+      const action = String(j.action || '').slice(0, 6);
+      const reason = String(j.reason || '');
+      if (!reason) return null;
+      return { action, reason };
+    } catch (e) {
+      this.logger.warn(`持仓决策分析失败：${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  private parseAdvice(
+    raw: string | null,
+  ): { action: string; reason: string } | null {
+    if (!raw) return null;
+    try {
+      const j = JSON.parse(raw);
+      if (!j?.reason) return null;
+      return { action: String(j.action || ''), reason: String(j.reason) };
+    } catch {
+      return null;
+    }
+  }
+
   private async getHolding(userId: string, symbol: string) {
     const h = await this.prisma.stockHolding.findUnique({
       where: { userId_symbol: { userId, symbol: symbol.toUpperCase() } },
     });
     return h
-      ? { buyPrice: h.buyPrice, shares: h.shares, accountId: h.accountId }
+      ? {
+          buyPrice: h.buyPrice,
+          shares: h.shares,
+          accountId: h.accountId,
+          advice: this.parseAdvice(h.advice),
+          adviceAt: h.adviceAt ? h.adviceAt.toISOString() : null,
+        }
       : null;
   }
 
-  /** 列表：该用户每只股票的最新一条快照（轻量字段） */
+  /**
+   * 列表：该用户每只股票的最新一条快照（轻量字段）。
+   * 价格/涨跌幅实时拉最新价覆盖（拉不到再回退快照），让列表与详情一致、不再停在旧快照。
+   */
   async list(userId: string) {
     const rows = await this.prisma.stockAnalysis.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
       distinct: ['symbol'],
     });
-    return rows.map((r) => {
-      const q = (r.quote as any) || {};
-      return {
-        symbol: r.symbol,
-        name: r.name,
-        nameZh: r.nameZh,
-        currency: q.currency || '',
-        price: q.price ?? null,
-        change: q.change ?? null,
-        changePercent: q.changePercent ?? null,
-        recommendation: q.recommendation ?? null,
-        rating: this.parseRating(r.analysis),
-        updatedAt: r.createdAt.toISOString(),
-      };
-    });
+    return Promise.all(
+      rows.map(async (r) => {
+        const q = (r.quote as any) || {};
+        const live = await this.fetchLivePrice(r.symbol).catch(() => null);
+        return {
+          symbol: r.symbol,
+          name: r.name,
+          nameZh: r.nameZh,
+          currency: live?.currency || q.currency || '',
+          price: live?.price ?? q.price ?? null,
+          change: live?.change ?? q.change ?? null,
+          changePercent: live?.changePercent ?? q.changePercent ?? null,
+          recommendation: q.recommendation ?? null,
+          rating: this.parseRating(r.analysis),
+          updatedAt: r.createdAt.toISOString(),
+        };
+      }),
+    );
   }
 
   private parseRating(analysis: string | null): string | null {

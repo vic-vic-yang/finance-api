@@ -95,11 +95,23 @@ export class StockHoldingService implements OnModuleInit {
     });
     if (!acc) return;
 
+    // 顺带做一次「我的持仓 + 股票数据」的 AI 持仓决策分析（best-effort，不阻断结算）
+    const advice = await this.stock
+      .analyzeHoldingDecision(h.symbol, {
+        buyPrice: h.buyPrice,
+        shares: h.shares,
+        currentPrice: price,
+      })
+      .catch(() => null);
+    const adviceData: { advice?: string; adviceAt?: Date } = advice
+      ? { advice: JSON.stringify(advice), adviceAt: now }
+      : {};
+
     // 尚无基准价 → 仅建立基准，不记账
     if (h.lastPrice == null || !(h.lastPrice > 0)) {
       await this.prisma.stockHolding.update({
         where: { id: h.id },
-        data: { lastPrice: price, lastCalcAt: now },
+        data: { lastPrice: price, lastCalcAt: now, ...adviceData },
       });
       return;
     }
@@ -107,10 +119,10 @@ export class StockHoldingService implements OnModuleInit {
     const delta = this.round2((price - h.lastPrice) * h.shares);
 
     if (Math.abs(delta) < 0.01) {
-      // 无变化（停牌/周末/休市）→ 仅推进结算时间
+      // 无变化（停牌/周末/休市）→ 仅推进结算时间（仍更新持仓建议）
       await this.prisma.stockHolding.update({
         where: { id: h.id },
-        data: { lastPrice: price, lastCalcAt: now },
+        data: { lastPrice: price, lastCalcAt: now, ...adviceData },
       });
       return;
     }
@@ -126,8 +138,9 @@ export class StockHoldingService implements OnModuleInit {
           categoryId,
           type: delta > 0 ? 'income' : 'expense',
           amount,
-          noteCipher: Buffer.from('', 'base64'), // 自动账单无备注（服务端无法加密）
-          noteDekVer: 1,
+          // 系统账单：服务端无法加密，noteCipher 存 UTF-8 明文，noteDekVer=0 让客户端按明文显示
+          noteCipher: Buffer.from(`${h.symbol} 当日盈亏`, 'utf8'),
+          noteDekVer: 0,
           date: now,
           source: 'stock',
           isTransfer: true, // 纸面盈亏：不计收支，仅反映市值变化
@@ -140,7 +153,7 @@ export class StockHoldingService implements OnModuleInit {
       });
       await tx.stockHolding.update({
         where: { id: h.id },
-        data: { lastPrice: price, lastCalcAt: now },
+        data: { lastPrice: price, lastCalcAt: now, ...adviceData },
       });
     });
     this.logger.log(
