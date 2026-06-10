@@ -757,15 +757,25 @@ export class StockService {
    * 价格/涨跌幅实时拉最新价覆盖（拉不到再回退快照），让列表与详情一致、不再停在旧快照。
    */
   async list(userId: string) {
-    const rows = await this.prisma.stockAnalysis.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-      distinct: ['symbol'],
-    });
+    const [rows, holdings] = await Promise.all([
+      this.prisma.stockAnalysis.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        distinct: ['symbol'],
+      }),
+      this.prisma.stockHolding.findMany({ where: { userId } }),
+    ]);
+    // symbol → 持仓（买入价/股数 > 0 才算持仓）
+    const hmap = new Map(
+      holdings
+        .filter((h) => h.buyPrice > 0 && h.shares > 0)
+        .map((h) => [h.symbol.toUpperCase(), h]),
+    );
     return Promise.all(
       rows.map(async (r) => {
         const q = (r.quote as any) || {};
         const live = await this.fetchLivePrice(r.symbol).catch(() => null);
+        const h = hmap.get(r.symbol.toUpperCase());
         return {
           symbol: r.symbol,
           name: r.name,
@@ -777,6 +787,10 @@ export class StockService {
           recommendation: q.recommendation ?? null,
           rating: this.parseRating(r.analysis),
           updatedAt: r.createdAt.toISOString(),
+          // 持仓信息（关注 tab 没有；持仓 tab 用来算盈亏）
+          held: !!h,
+          buyPrice: h?.buyPrice ?? null,
+          shares: h?.shares ?? null,
         };
       }),
     );

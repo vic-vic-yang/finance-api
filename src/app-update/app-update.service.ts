@@ -42,6 +42,28 @@ export class AppUpdateService {
       'Content-Type': 'application/vnd.android.package-archive',
       'Content-Disposition': `attachment; filename="${info.apkFile}"`,
     });
-    return new StreamableFile(fs.createReadStream(apk));
+    const file = new StreamableFile(fs.createReadStream(apk));
+    // 大包走隧道，客户端中途断开很常见——静默处理，别当 ERROR 刷屏
+    file.setErrorHandler((err: any, response: any) => {
+      if (isClientAbort(err)) {
+        response.end();
+        return;
+      }
+      this.logger.warn(`APK 下载流错误：${err?.message}`);
+      if (!response.headersSent) response.statusCode = 500;
+      response.end();
+    });
+    return file;
   }
+}
+
+/** 客户端主动断开（下载中断/取消），属正常现象，不该记 ERROR */
+export function isClientAbort(err: any): boolean {
+  const code = err?.code;
+  return (
+    code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ERR_STREAM_DESTROYED'
+  );
 }

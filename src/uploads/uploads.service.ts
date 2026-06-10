@@ -7,6 +7,7 @@ import type { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import { isClientAbort } from '../app-update/app-update.service';
 
 /** 凭证图片：存自建服务器 uploads/vouchers/，随机文件名，登录才可读。 */
 @Injectable()
@@ -54,6 +55,12 @@ export class UploadsService {
             ? 'image/gif'
             : 'image/jpeg';
     res.set({ 'Content-Type': mime, 'Cache-Control': 'private, max-age=86400' });
-    return new StreamableFile(fs.createReadStream(f));
+    const file = new StreamableFile(fs.createReadStream(f));
+    // 客户端取消加载图片很常见，静默处理不刷 ERROR
+    file.setErrorHandler((err: any, response: any) => {
+      if (!isClientAbort(err) && !response.headersSent) response.statusCode = 500;
+      response.end();
+    });
+    return file;
   }
 }
