@@ -41,6 +41,18 @@ export class PicksService implements OnModuleInit {
     );
   }
 
+  /**
+   * 早盘多次补算（自愈）：凌晨电脑没开 → 00:30 没跑成时，
+   * 早上 7/8/9 点开机后任一时刻自动把今天补出来（幂等，已生成则秒跳过）。
+   * 9:30 开盘前都用上一交易日收盘价，选股基准稳定。
+   */
+  @Cron('0 0 7,8,9 * * *')
+  async morningCatchup() {
+    await this.ensureToday().catch((e) =>
+      this.logger.warn(`早盘补算失败：${e?.message}`),
+    );
+  }
+
   /** 幂等生成今日榜单（inflight 锁，避免并发重入） */
   async ensureToday(): Promise<void> {
     if (this.inflight) return this.inflight;
