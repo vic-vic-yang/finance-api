@@ -239,6 +239,9 @@ model Bill {
   source     String   @default("manual")
   /// 是否为转账账单（账户间转账拆成的一收一支）。转账不计入收支统计/预算，但在账单列表可见。
   isTransfer Boolean  @default(false)
+  /// 银行流水的「联机余额」（该笔交易后的账户余额）。仅银行类导入有；
+  /// 用作高精度去重的天然唯一键，最新一笔还可用来校准账户余额。
+  bankBalance Decimal? @db.Decimal(15, 2)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 

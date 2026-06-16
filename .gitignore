@@ -10,3 +10,6 @@ app-release/
 # 凭证图片上传目录（本地运行时生成，不入库）
 # 注意：根锚定，避免误伤源码目录 src/uploads/
 /uploads/
+
+# 数据备份（含金额/密文，绝不入库）
+backup-*.json

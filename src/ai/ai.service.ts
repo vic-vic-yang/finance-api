@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgersService } from '../ledgers/ledgers.service';
 import { AccountsService } from '../accounts/accounts.service';
+import { LoansService } from '../loans/loans.service';
 import { ApplyImportDto } from './dto/apply-import.dto';
 import { LlmRegistry } from './llm/llm-registry';
 import {
@@ -27,7 +28,7 @@ import { PdfExtractor } from './extractors/pdf.extractor';
 import { CsvExtractor } from './extractors/csv.extractor';
 import { XlsxExtractor } from './extractors/xlsx.extractor';
 import { TextExtractor } from './extractors/text.extractor';
-import { normalizeDirection, dedupDrafts } from './import-dedup';
+import { normalizeDirection, dedupDrafts, dedupKey } from './import-dedup';
 import { isGatewayPayment, filterGatewayDups } from './gateway-dedup';
 
 /** AI 返回的单条草稿（明文，等客户端加密入库）。
@@ -49,6 +50,8 @@ export interface AiDraft {
   fundingHint?: string;
   /** 交易对方（transfer 行的 to 端线索）；仅草稿用，不入库 */
   counterparty?: string;
+  /** 银行流水的联机余额（该笔后账户余额）；用于高精度去重 + 校准。无则 null */
+  balance?: number | null;
 }
 
 @Injectable()
@@ -67,6 +70,7 @@ export class AiService {
     private readonly ledgers: LedgersService,
     private readonly llmRegistry: LlmRegistry,
     private readonly accounts: AccountsService,
+    private readonly loans: LoansService,
   ) {}
 
   // ── 列表 / 详情 / 删除 ──────────────────────────────────────
@@ -544,6 +548,10 @@ export class AiService {
               externalId: b.externalId ?? null,
               source: b.source ?? 'manual',
               isTransfer: b.isTransfer ?? false,
+              bankBalance:
+                b.bankBalance != null
+                  ? new Prisma.Decimal(b.bankBalance)
+                  : null,
             },
           }),
           this.prisma.account.update({
@@ -577,15 +585,67 @@ export class AiService {
       }
     }
 
+    // 处理「借贷」行（借给别人/向别人借 → 进借贷往来，自动建应收/应付 + 转账类账单）
+    let loaned = 0;
+    for (const l of dto.loans ?? []) {
+      try {
+        await this.loans.create(item.ledgerId, userId, {
+          direction: l.direction,
+          amount: l.amount,
+          accountId: l.accountId,
+          noteCipher: l.noteCipher,
+          noteDekVer: l.noteDekVer,
+          date: l.date,
+        });
+        loaned++;
+      } catch (e) {
+        this.logger.warn(`loan apply 失败(跳过): ${e}`);
+      }
+    }
+
+    // 用银行联机余额校准账户余额：账户余额 = 最后一笔带余额的流水的余额 + 其后流水净额。
+    // 银行余额是权威值，能消除多次导入/手工记账累积的漂移。
+    const balAccts = [
+      ...new Set(
+        bills
+          .filter((b) => b.bankBalance != null && !b.isTransfer)
+          .map((b) => b.accountId),
+      ),
+    ];
+    for (const accId of balAccts) {
+      try {
+        const anchor = await this.prisma.bill.findFirst({
+          where: { accountId: accId, bankBalance: { not: null } },
+          orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+          select: { date: true, bankBalance: true },
+        });
+        if (!anchor?.bankBalance) continue;
+        const laterBills = await this.prisma.bill.findMany({
+          where: { accountId: accId, date: { gt: anchor.date } },
+          select: { type: true, amount: true },
+        });
+        let bal = new Prisma.Decimal(anchor.bankBalance);
+        for (const lb of laterBills) {
+          bal = lb.type === 'income' ? bal.plus(lb.amount) : bal.minus(lb.amount);
+        }
+        await this.prisma.account.update({
+          where: { id: accId },
+          data: { balance: bal },
+        });
+      } catch (e) {
+        this.logger.warn(`余额校准失败 (${accId}): ${e}`);
+      }
+    }
+
     const after = await this.prisma.aiImport.update({
       where: { id },
       data: {
         status: 'done',
         progress: 100,
         message:
-          bills.length === 0 && transferred === 0
+          bills.length === 0 && transferred === 0 && loaned === 0
             ? '全部与已有账单重复，无需入库'
-            : `已入库 ${inserted}/${bills.length} 条${transferred ? `，转账 ${transferred} 笔` : ''}`,
+            : `已入库 ${inserted}/${bills.length} 条${transferred ? `，转账 ${transferred} 笔` : ''}${loaned ? `，借贷 ${loaned} 笔` : ''}`,
         insertedCount: inserted,
         // 应用后清掉明文草稿（保留 rawOutput 方便排查）
         draftsJson: null,
@@ -822,7 +882,7 @@ export class AiService {
       if (r.finishReason && !firstFinishReason) firstFinishReason = r.finishReason;
       allRaws.push(r.raw);
       for (const d of r.list) {
-        const fp = `${d.date}|${d.amount.toFixed(2)}`;
+        const fp = dedupKey(d);
         if (!seen.has(fp)) {
           seen.add(fp);
           merged.push(d);
@@ -903,7 +963,7 @@ export class AiService {
         '转账/红包/零钱通 → 转账>转入 或 转账>转出',
         '',
         '【输出格式】',
-        '{"bills":[{"type":"expense"|"income","direction":"expense"|"income"|"transfer","amount":正数,"categoryName":"一级>二级或一级","note":"商户·商品·摘要（·分隔）","date":"ISO8601","orderId":"交易订单号原样","paymentMethod":"收/付款方式原样","counterparty":"交易对方原样"}]}',
+        '{"bills":[{"type":"expense"|"income","direction":"expense"|"income"|"transfer","amount":正数,"categoryName":"一级>二级或一级","note":"商户·商品·摘要（·分隔）","date":"ISO8601","orderId":"交易订单号原样","paymentMethod":"收/付款方式原样","counterparty":"交易对方原样","balance":联机余额数值或null}]}',
         '',
         '【注意事项】',
         '- 同一笔交易只出一条，不要拆成支出+收入',
@@ -912,6 +972,7 @@ export class AiService {
         '- note 写商户名/商品/备注，不要写日期或金额',
         '- direction：账单的"收/支"列若是"不计收支"(还款/充值/提现/转账)填 transfer；否则按收入/支出填',
         '- orderId/paymentMethod/counterparty：账单里有就原样照抄，没有就空串；忽略对账单顶部的汇总抬头行',
+        '- balance：银行流水若有"联机余额/余额/Balance"列，填该笔交易后的余额数值；没有该列就填 null',
       ].join('\n'),
     };
 
@@ -974,6 +1035,10 @@ export class AiService {
         externalId: String(o?.orderId || '').trim() || undefined,
         fundingHint: String(o?.paymentMethod || '').trim() || undefined,
         counterparty: String(o?.counterparty || '').trim() || undefined,
+        balance:
+          o?.balance != null && isFinite(Number(o.balance))
+            ? Number(o.balance)
+            : null,
       });
     }
     const inputCapped =
@@ -999,21 +1064,43 @@ export class AiService {
       date: new Date(d.date),
       amount: new Prisma.Decimal(d.amount),
     }));
+    // 有银行余额的草稿额外按「金额+余额」匹配——重导入时即便 AI 把时间解析得略有不同，
+    // 也能凭余额(唯一)命中已入库的同一笔，稳去重。
+    const balOrs: Prisma.BillWhereInput[] = drafts
+      .filter((d) => d.balance != null)
+      .map((d) => ({
+        amount: new Prisma.Decimal(d.amount),
+        bankBalance: new Prisma.Decimal(d.balance as number),
+      }));
     const existing = await this.prisma.bill.findMany({
       where: {
         ledgerId,
         OR: [
           ...(extIds.length ? [{ externalId: { in: extIds } }] : []),
           ...ors,
+          ...balOrs,
         ],
       },
-      select: { date: true, amount: true, externalId: true },
+      select: {
+        date: true,
+        amount: true,
+        type: true,
+        bankBalance: true,
+        externalId: true,
+      },
     });
     const existExt = new Set(
       existing.map((b) => b.externalId).filter(Boolean) as string[],
     );
     const existDak = new Set(
-      existing.map((b) => `${b.date.getTime()}|${Number(b.amount)}`),
+      existing.map((b) =>
+        dedupKey({
+          amount: Number(b.amount),
+          date: b.date.toISOString(),
+          type: b.type,
+          balance: b.bankBalance != null ? Number(b.bankBalance) : null,
+        }),
+      ),
     );
 
     // 跨文件去重：查询同一账本下其他「尚未入库」的 AI 导入草稿
@@ -1043,7 +1130,7 @@ export class AiService {
           if (pd.externalId) {
             existExt.add(pd.externalId);
           } else {
-            existDak.add(`${new Date(pd.date).getTime()}|${Number(pd.amount)}`);
+            existDak.add(dedupKey(pd));
           }
         }
       }

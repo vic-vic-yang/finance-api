@@ -14,7 +14,27 @@ export function normalizeDirection(v: string | undefined | null): Direction {
 interface DedupInput {
   amount: number;
   date: string;
+  /** income/expense —— 收/支方向，避免同日同额的一收一支被误判重复 */
+  type?: string;
+  /** 银行联机余额；有则作为高精度唯一键（每笔余额都不同，最稳） */
+  balance?: number | null;
   externalId?: string;
+}
+
+/**
+ * 去重指纹：有银行余额 → 用「金额|余额」(余额天然唯一，最精准，连同日同额多笔也能区分)；
+ * 没余额 → 退回「日期|金额|方向」。两种 key 前缀隔离，互不串。
+ */
+export function dedupKey(d: {
+  amount: number;
+  date: string;
+  type?: string;
+  balance?: number | null;
+}): string {
+  if (d.balance != null && isFinite(Number(d.balance))) {
+    return `bal|${Number(d.amount)}|${Number(d.balance)}`;
+  }
+  return `dat|${new Date(d.date).getTime()}|${Number(d.amount)}|${d.type ?? ''}`;
 }
 
 /**
@@ -36,7 +56,7 @@ export function dedupDrafts<T extends DedupInput>(
       seenExt.add(d.externalId);
       kept.push(d);
     } else {
-      const key = `${new Date(d.date).getTime()}|${Number(d.amount)}`;
+      const key = dedupKey(d);
       if (seenDak.has(key)) { skipped++; continue; }
       seenDak.add(key);
       kept.push(d);

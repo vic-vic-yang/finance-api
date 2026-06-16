@@ -16,6 +16,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { BillsService } from './bills.service';
 import { CreateBillDto } from './dto/create-bill.dto';
 import { UpdateBillDto } from './dto/update-bill.dto';
+import { ConvertBillDto } from './dto/convert-bill.dto';
 import { QueryBillDto } from './dto/query-bill.dto';
 
 @Controller('bills')
@@ -46,6 +47,17 @@ export class BillsController {
   @Put(':id')
   update(@Request() req, @Param('id') id: string, @Body() dto: UpdateBillDto) {
     return this.billsService.update(
+      req.user.currentLedgerId,
+      req.user.id,
+      id,
+      dto,
+    );
+  }
+
+  /** 把一条普通账单转为「借贷」或「账户间转账」 */
+  @Post(':id/convert')
+  convert(@Request() req, @Param('id') id: string, @Body() dto: ConvertBillDto) {
+    return this.billsService.convert(
       req.user.currentLedgerId,
       req.user.id,
       id,

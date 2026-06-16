@@ -53,6 +53,12 @@ export class ApplyBillItemDto {
   @IsBoolean()
   @IsOptional()
   isTransfer?: boolean;
+
+  /** 银行联机余额（该笔后余额）；用于高精度去重 + 校准账户余额 */
+  @Type(() => Number)
+  @IsNumber()
+  @IsOptional()
+  bankBalance?: number;
 }
 
 export class ApplyTransferItemDto {
@@ -68,6 +74,33 @@ export class ApplyTransferItemDto {
   amount: number;
 }
 
+/** 导入时被归类为「借贷」的行 → 进借贷往来（借出=应收 / 借入=应付） */
+export class ApplyLoanItemDto {
+  @IsEnum(['lend', 'borrow'])
+  direction: 'lend' | 'borrow';
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  amount: number;
+
+  @IsString()
+  accountId: string;
+
+  /** 备注密文（base64），如"借给羊小斌" */
+  @IsString()
+  @IsOptional()
+  noteCipher?: string;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsOptional()
+  noteDekVer?: number;
+
+  @IsDateString()
+  date: string;
+}
+
 export class ApplyImportDto {
   @IsArray()
   @ValidateNested({ each: true })
@@ -79,4 +112,10 @@ export class ApplyImportDto {
   @ValidateNested({ each: true })
   @Type(() => ApplyTransferItemDto)
   transfers?: ApplyTransferItemDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ApplyLoanItemDto)
+  loans?: ApplyLoanItemDto[];
 }

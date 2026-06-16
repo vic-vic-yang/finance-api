@@ -1,8 +1,13 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateBillDto } from './dto/create-bill.dto';
 import { UpdateBillDto } from './dto/update-bill.dto';
+import { ConvertBillDto } from './dto/convert-bill.dto';
 import { QueryBillDto } from './dto/query-bill.dto';
 
 const BILL_INCLUDE = {
@@ -200,6 +205,115 @@ export class BillsService {
       }
       return { message: '更新成功', bill: this.serialize(bill) };
     });
+  }
+
+  /**
+   * 把一条普通账单转为「借贷」或「账户间转账」——原地重分类，不重复扣钱。
+   * 钱已经在原账单里动过了，这里只把原账单标成转账类(不再计收支)，
+   * 再补上借贷记录 / 转账对端，余额保持正确。
+   */
+  async convert(
+    ledgerId: string,
+    userId: string,
+    id: string,
+    dto: ConvertBillDto,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await tx.bill.findFirst({ where: { id, ledgerId } });
+      if (!bill) throw new NotFoundException('账单不存在');
+      if (bill.isTransfer) {
+        throw new BadRequestException('该账单已是转账/借贷类，无需转换');
+      }
+      const amount = bill.amount; // Decimal
+
+      if (dto.to === 'loan') {
+        // 支出→借出(lend，应收)；收入→借入(borrow，应付)
+        const direction = bill.type === 'expense' ? 'lend' : 'borrow';
+        const noteCipher =
+          dto.noteCipher !== undefined
+            ? dto.noteCipher || null
+            : bill.noteCipher
+              ? Buffer.from(bill.noteCipher).toString('base64')
+              : null;
+        await tx.loan.create({
+          data: {
+            ledgerId,
+            userId,
+            direction,
+            amount,
+            accountId: bill.accountId,
+            noteCipher,
+            noteDekVer: dto.noteDekVer ?? bill.noteDekVer,
+            date: bill.date,
+          },
+        });
+        const categoryId = await this.getOrCreateLoanCategory(tx, ledgerId);
+        await tx.bill.update({
+          where: { id },
+          data: { isTransfer: true, categoryId },
+        });
+        return { message: '已转为借贷' };
+      }
+
+      // dto.to === 'transfer'：账户间转账
+      if (!dto.toAccountId) {
+        throw new BadRequestException('请提供转入/转出对端账户');
+      }
+      const other = await tx.account.findFirst({
+        where: { id: dto.toAccountId, ledgerId },
+      });
+      if (!other) throw new NotFoundException('对端账户不存在');
+      if (other.id === bill.accountId) {
+        throw new BadRequestException('对端账户不能是本账户');
+      }
+      // 原账单标转账类（余额已动过，不再调整）
+      await tx.bill.update({ where: { id }, data: { isTransfer: true } });
+      // 对端建相反方向的转账账单 + 调整对端余额
+      const counterType = bill.type === 'expense' ? 'income' : 'expense';
+      await tx.bill.create({
+        data: {
+          ledgerId,
+          userId,
+          accountId: other.id,
+          categoryId: bill.categoryId,
+          type: counterType,
+          amount,
+          noteCipher: Buffer.from('', 'base64'),
+          noteDekVer: 1,
+          date: bill.date,
+          source: bill.source,
+          isTransfer: true,
+        },
+      });
+      await tx.account.update({
+        where: { id: other.id },
+        data:
+          counterType === 'income'
+            ? { balance: { increment: amount } }
+            : { balance: { decrement: amount } },
+      });
+      return { message: '已转为账户间转账' };
+    });
+  }
+
+  private async getOrCreateLoanCategory(
+    tx: Prisma.TransactionClient,
+    ledgerId: string,
+  ): Promise<string> {
+    const exist = await tx.category.findFirst({
+      where: { ledgerId, name: '借贷', parentId: null },
+    });
+    if (exist) return exist.id;
+    const created = await tx.category.create({
+      data: {
+        name: '借贷',
+        type: 'expense',
+        ledgerId,
+        icon: '🤝',
+        isSystem: false,
+      },
+    });
+    return created.id;
   }
 
   async remove(ledgerId: string, id: string) {
