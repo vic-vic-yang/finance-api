@@ -147,6 +147,8 @@ model Account {
   nameDekVer Int             @default(1)
   type       AccountType
   balance    Decimal         @default(0) @db.Decimal(15, 2)
+  /// 初始余额（建账时录入；老账户由 当前余额 − 历史净收支 回填）
+  initialBalance Decimal     @default(0) @db.Decimal(15, 2)
   icon       String?
   color      String?
   createdAt  DateTime        @default(now())

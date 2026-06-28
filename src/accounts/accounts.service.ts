@@ -82,6 +82,7 @@ export class AccountsService {
         nameDekVer: dto.nameDekVer,
         type: dto.type,
         balance: new Prisma.Decimal(balance),
+        initialBalance: new Prisma.Decimal(balance),
         icon: dto.icon,
         color: dto.color,
         statementDay: dto.statementDay ?? null,
@@ -297,8 +298,8 @@ export class AccountsService {
       });
       if (!account) throw new NotFoundException('账户不存在');
       this.ensureAccess(account, userId);
-      if (account.type === 'CREDIT' || account.type === 'DEBT') {
-        throw new BadRequestException('信用卡/负债账户暂不支持校准余额');
+      if (account.type === 'DEBT') {
+        throw new BadRequestException('负债账户的余额由还款计划推导，不支持校准');
       }
 
       const target = new Prisma.Decimal(String(dto.actualBalance));
@@ -418,6 +419,8 @@ export class AccountsService {
       nameDekVer: account.nameDekVer,
       type: account.type,
       balance: balanceVisible ? Number(account.balance) : 0,
+      initialBalance:
+          balanceVisible ? Number(account.initialBalance ?? 0) : 0,
       balanceVisible,
       icon: account.icon,
       color: account.color,
