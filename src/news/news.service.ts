@@ -88,8 +88,8 @@ export class NewsService implements OnModuleInit {
     return !['false', '0', 'no', 'n'].includes(v);
   }
 
-  /** 每天 早 7:00 / 午 12:00 / 晚 20:00 各抓一次（后端常驻时生效） */
-  @Cron('0 0 7,12,20 * * *')
+  /** 工作日 早 7:00 抓一次并跑 LLM 富化（后端常驻时生效） */
+  @Cron('0 0 7 * * 1-5')
   async scheduledFetch() {
     this.logger.log('定时抓取财经新闻（早7/午12/晚20）…');
     await this.fetchAndStore().catch((e) =>

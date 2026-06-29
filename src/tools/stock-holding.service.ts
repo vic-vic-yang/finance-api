@@ -32,8 +32,8 @@ export class StockHoldingService implements OnModuleInit {
     );
   }
 
-  /** 每天 15:00 收盘后结算（后端常驻时生效） */
-  @Cron('0 0 15 * * *')
+  /** 工作日 15:30 收盘后结算（15:00 收盘，留半小时让价格更稳；后端常驻时生效） */
+  @Cron('0 30 15 * * 1-5')
   async scheduledSettle() {
     this.logger.log('收盘结算持仓当日盈亏（15:00）…');
     await this.settleAllDue().catch((e) =>
