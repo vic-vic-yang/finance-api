@@ -36,6 +36,15 @@ export class ToolsController {
     return this.stock.list(req.user.id);
   }
 
+  /** GET /api/tools/holdings/pnl-daily?days=30 —— 组合每日总盈亏 */
+  @Get('holdings/pnl-daily')
+  pnlDaily(@Request() req, @Query('days') days?: string) {
+    return this.holdings.dailyPnl(
+      req.user.id,
+      days ? parseInt(days, 10) : 30,
+    );
+  }
+
   /** GET /api/tools/stocks/:symbol —— 某股票保存的完整分析 + 历史 */
   @Get('stocks/:symbol')
   stockSaved(@Request() req, @Param('symbol') symbol: string) {

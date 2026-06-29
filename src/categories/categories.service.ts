@@ -270,6 +270,13 @@ export class CategoriesService implements OnModuleInit {
       include: { parent: { select: { name: true, icon: true } } },
     });
 
+    // 本账本的自定义排序覆盖（sortOrder 越小越靠前）
+    const sorts = await this.prisma.categorySort.findMany({
+      where: { ledgerId },
+      select: { categoryId: true, sortOrder: true },
+    });
+    const orderMap = new Map(sorts.map((s) => [s.categoryId, s.sortOrder]));
+
     const isOther = (name: string) =>
       typeof name === 'string' && name.startsWith('其他');
 
@@ -281,6 +288,13 @@ export class CategoriesService implements OnModuleInit {
         if (aPid === '') return -1;
         if (bPid === '') return 1;
         return aPid.localeCompare(bPid);
+      }
+      // 组内：自定义排序优先，覆盖以下所有默认规则
+      const ao = orderMap.get(a.id);
+      const bo = orderMap.get(b.id);
+      if (ao != null || bo != null) {
+        if (ao != null && bo != null) return ao - bo;
+        return ao != null ? -1 : 1;
       }
       // "其他…" 排到所在组最后
       const aOther = isOther(a.name);
@@ -351,6 +365,26 @@ export class CategoriesService implements OnModuleInit {
       throw new ForbiddenException('无权操作');
 
     await this.prisma.category.delete({ where: { id } });
+    // 顺手清掉它的排序覆盖记录（避免残留）
+    await this.prisma.categorySort
+      .deleteMany({ where: { categoryId: id } })
+      .catch(() => {});
     return { message: '删除成功' };
+  }
+
+  /** 保存某同级分组的自定义排序：orderedIds 按展示顺序排好，逐个写入 sortOrder=index */
+  async reorder(ledgerId: string, orderedIds: string[]) {
+    const ids = (orderedIds ?? []).filter((x) => typeof x === 'string');
+    if (ids.length === 0) return { message: '无变化' };
+    await this.prisma.$transaction(
+      ids.map((cid, i) =>
+        this.prisma.categorySort.upsert({
+          where: { ledgerId_categoryId: { ledgerId, categoryId: cid } },
+          create: { ledgerId, categoryId: cid, sortOrder: i },
+          update: { sortOrder: i },
+        }),
+      ),
+    );
+    return { message: '排序已保存' };
   }
 }

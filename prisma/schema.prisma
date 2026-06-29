@@ -217,6 +217,20 @@ model Category {
   @@index([parentId])
 }
 
+/// 按账本的分类自定义排序。
+/// 系统分类全局共享（ledgerId=null），无法在 Category 上存「每个账本各自的顺序」，
+/// 故用本表为某账本记录某分类的次序（sortOrder 越小越靠前）。仅作展示排序覆盖用。
+model CategorySort {
+  id         String   @id @default(cuid())
+  ledgerId   String
+  categoryId String
+  sortOrder  Int
+  createdAt  DateTime @default(now())
+
+  @@unique([ledgerId, categoryId])
+  @@index([ledgerId])
+}
+
 model Bill {
   id         String   @id @default(cuid())
   ledgerId   String

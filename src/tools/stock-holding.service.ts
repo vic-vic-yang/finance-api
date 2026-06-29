@@ -59,6 +59,32 @@ export class StockHoldingService implements OnModuleInit {
     }
   }
 
+  /** 组合每日总盈亏：聚合 source='stock' 的当日盈亏账单，按本地日合计 */
+  async dailyPnl(
+    userId: string,
+    days = 30,
+  ): Promise<{ date: string; pnl: number }[]> {
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    since.setHours(0, 0, 0, 0);
+    const bills = await this.prisma.bill.findMany({
+      where: { userId, source: 'stock', date: { gte: since } },
+      select: { date: true, amount: true, type: true },
+      orderBy: { date: 'asc' },
+    });
+    const map = new Map<string, number>();
+    for (const b of bills) {
+      const d = b.date;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const signed = (b.type === 'income' ? 1 : -1) * Number(b.amount);
+      map.set(key, (map.get(key) ?? 0) + signed);
+    }
+    return [...map.entries()].map(([date, pnl]) => ({
+      date,
+      pnl: this.round2(pnl),
+    }));
+  }
+
   private async _settle(where: Prisma.StockHoldingWhereInput): Promise<void> {
     const holdings = await this.prisma.stockHolding.findMany({
       where: {

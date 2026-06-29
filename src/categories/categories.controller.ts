@@ -27,6 +27,15 @@ export class CategoriesController {
     );
   }
 
+  /** 自定义排序：body.orderedIds 为某同级分组按展示顺序排好的分类 id 列表 */
+  @Patch('reorder')
+  reorder(@Request() req, @Body() body: { orderedIds: string[] }) {
+    return this.categoriesService.reorder(
+      req.user.currentLedgerId,
+      body?.orderedIds ?? [],
+    );
+  }
+
   @Patch(':id')
   update(@Request() req, @Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     return this.categoriesService.update(req.user.currentLedgerId, id, dto);
