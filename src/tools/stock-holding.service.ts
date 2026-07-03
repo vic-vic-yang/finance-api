@@ -121,6 +121,20 @@ export class StockHoldingService implements OnModuleInit {
     });
     if (!acc) return;
 
+    // 原子占位（防并发重复结算）：把 lastCalcAt 抢占为今天，只有一个并发运行成功。
+    // 「今天是否已结算」的判断+写入必须原子，否则 15:30 前后多个 settleForUser 并发
+    // 会各自以为今天没结算 → 同日重复记账、账户余额被重复加减。
+    // updateMany 在行锁下重新校验 where，故第二个并发运行会 count=0 直接退出。
+    const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const claim = await this.prisma.stockHolding.updateMany({
+      where: {
+        id: h.id,
+        OR: [{ lastCalcAt: null }, { lastCalcAt: { lt: startToday } }],
+      },
+      data: { lastCalcAt: now },
+    });
+    if (claim.count === 0) return; // 今天已被别的运行结算过
+
     // 顺带做一次「我的持仓 + 股票数据」的 AI 持仓决策分析（best-effort，不阻断结算）
     const advice = await this.stock
       .analyzeHoldingDecision(h.symbol, {
@@ -142,9 +156,17 @@ export class StockHoldingService implements OnModuleInit {
       return;
     }
 
-    const delta = this.round2((price - h.lastPrice) * h.shares);
+    // 市值变化：用于账户余额，保证账户 = 最新市值（即便漏结算多天也一次性自愈）
+    const mvDelta = this.round2((price - h.lastPrice) * h.shares);
+    // 当日盈亏（流水口径）：优先「今日每股涨跌 × 股数」，与持仓卡一致；
+    // 拿不到今日涨跌时才回退到市值变化。避免漏结算把多天涨幅误记成「当日」。
+    const change = live?.change;
+    const dayDelta =
+      change != null && Number.isFinite(change)
+        ? this.round2(change * h.shares)
+        : mvDelta;
 
-    if (Math.abs(delta) < 0.01) {
+    if (Math.abs(mvDelta) < 0.01 && Math.abs(dayDelta) < 0.01) {
       // 无变化（停牌/周末/休市）→ 仅推进结算时间（仍更新持仓建议）
       await this.prisma.stockHolding.update({
         where: { id: h.id },
@@ -153,37 +175,49 @@ export class StockHoldingService implements OnModuleInit {
       return;
     }
 
+    // 备注用股票名称（优先中文名），拿不到再回退代码
+    const meta = await this.prisma.stockAnalysis.findFirst({
+      where: { symbol: h.symbol },
+      orderBy: { createdAt: 'desc' },
+      select: { name: true, nameZh: true },
+    });
+    const displayName = meta?.nameZh || meta?.name || h.symbol;
+
     await this.prisma.$transaction(async (tx) => {
-      const categoryId = await this.getOrCreateInvestCategory(tx, h.ledgerId);
-      const amount = new Prisma.Decimal(Math.abs(delta));
-      await tx.bill.create({
-        data: {
-          ledgerId: h.ledgerId,
-          userId: h.userId,
-          accountId: h.accountId,
-          categoryId,
-          type: delta > 0 ? 'income' : 'expense',
-          amount,
-          // 系统账单：服务端无法加密，noteCipher 存 UTF-8 明文，noteDekVer=0 让客户端按明文显示
-          noteCipher: Buffer.from(`${h.symbol} 当日盈亏`, 'utf8'),
-          noteDekVer: 0,
-          date: now,
-          source: 'stock',
-          isTransfer: true, // 纸面盈亏：不计收支，仅反映市值变化
-        },
-      });
-      // 余额更新为最新市值（按 delta 增减；盈→增，亏→减）
-      await tx.account.update({
-        where: { id: h.accountId },
-        data: { balance: { increment: new Prisma.Decimal(delta) } },
-      });
+      // 当日盈亏账单：按「今日涨跌」记，>0.01 才记一条
+      if (Math.abs(dayDelta) >= 0.01) {
+        const categoryId = await this.getOrCreateInvestCategory(tx, h.ledgerId);
+        await tx.bill.create({
+          data: {
+            ledgerId: h.ledgerId,
+            userId: h.userId,
+            accountId: h.accountId,
+            categoryId,
+            type: dayDelta > 0 ? 'income' : 'expense',
+            amount: new Prisma.Decimal(Math.abs(dayDelta)),
+            // 系统账单：服务端无法加密，noteCipher 存 UTF-8 明文，noteDekVer=0 让客户端按明文显示
+            noteCipher: Buffer.from(`${displayName} 当日盈亏`, 'utf8'),
+            noteDekVer: 0,
+            date: now,
+            source: 'stock',
+            isTransfer: true, // 纸面盈亏：不计收支，仅反映市值变化
+          },
+        });
+      }
+      // 余额更新为最新市值（按市值变化增减；盈→增，亏→减）
+      if (Math.abs(mvDelta) >= 0.01) {
+        await tx.account.update({
+          where: { id: h.accountId },
+          data: { balance: { increment: new Prisma.Decimal(mvDelta) } },
+        });
+      }
       await tx.stockHolding.update({
         where: { id: h.id },
         data: { lastPrice: price, lastCalcAt: now, ...adviceData },
       });
     });
     this.logger.log(
-      `${h.symbol} 当日${delta > 0 ? '收益' : '亏损'} ${Math.abs(delta).toFixed(2)} → 账户 ${h.accountId}`,
+      `${h.symbol} 当日${dayDelta > 0 ? '收益' : '亏损'} ${Math.abs(dayDelta).toFixed(2)}（市值变化 ${mvDelta.toFixed(2)}）→ 账户 ${h.accountId}`,
     );
   }
 
