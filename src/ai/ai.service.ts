@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgersService } from '../ledgers/ledgers.service';
@@ -52,6 +53,15 @@ export interface AiDraft {
   counterparty?: string;
   /** 银行流水的联机余额（该笔后账户余额）；用于高精度去重 + 校准。无则 null */
   balance?: number | null;
+  /** 商户名哈希（sha256(规整后 counterparty)），入库到 Bill 供"分类纠正记忆"用 */
+  merchantHash?: string;
+}
+
+/** 商户名 → 稳定哈希：小写、去空白后 sha256。空商户返回 undefined */
+export function merchantHashOf(merchant?: string | null): string | undefined {
+  const norm = (merchant || '').toLowerCase().replace(/\s+/g, '');
+  if (!norm) return undefined;
+  return createHash('sha256').update(norm, 'utf8').digest('hex');
 }
 
 @Injectable()
@@ -552,6 +562,7 @@ export class AiService {
                 b.bankBalance != null
                   ? new Prisma.Decimal(b.bankBalance)
                   : null,
+              merchantHash: b.merchantHash ?? null,
             },
           }),
           this.prisma.account.update({
@@ -731,15 +742,41 @@ export class AiService {
         progress: 60,
         message: '匹配分类…',
       });
+      // 分类纠正记忆：用户改过"某商户 → 某分类"，同商户直接套用（优先于 AI 判断）
+      const corrections = await this.prisma.categoryCorrection.findMany({
+        where: { ledgerId: rec0.ledgerId },
+        select: { merchantHash: true, categoryId: true },
+      });
+      // 纠正目标分类的 type（income/expense），套用前校验与账单方向一致
+      const correctedCats = await this.prisma.category.findMany({
+        where: { id: { in: corrections.map((c) => c.categoryId) } },
+        select: { id: true, type: true },
+      });
+      const catTypeById = new Map(correctedCats.map((c) => [c.id, c.type]));
+      const correctionMap = new Map(
+        corrections.map((c) => [c.merchantHash, c.categoryId]),
+      );
+
       const resolved: AiDraft[] = [];
       for (const d of drafts.list) {
-        const categoryId = await this._resolveCategoryId(
-          rec0.ledgerId,
-          d.categoryName,
-          d.type,
-          d.note,
-        );
-        resolved.push({ ...d, categoryId, accountId: rec0.accountId });
+        const mHash = merchantHashOf(d.counterparty);
+        const hit = mHash ? correctionMap.get(mHash) : undefined;
+        const corrected =
+          hit && catTypeById.get(hit) === d.type ? hit : undefined;
+        const categoryId =
+          corrected ??
+          (await this._resolveCategoryId(
+            rec0.ledgerId,
+            d.categoryName,
+            d.type,
+            d.note,
+          ));
+        resolved.push({
+          ...d,
+          categoryId,
+          accountId: rec0.accountId,
+          merchantHash: mHash,
+        });
       }
 
       // 5) 去重 —— 同账本 + 同 date(秒精度) + 同 amount

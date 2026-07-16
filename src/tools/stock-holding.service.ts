@@ -135,23 +135,11 @@ export class StockHoldingService implements OnModuleInit {
     });
     if (claim.count === 0) return; // 今天已被别的运行结算过
 
-    // 顺带做一次「我的持仓 + 股票数据」的 AI 持仓决策分析（best-effort，不阻断结算）
-    const advice = await this.stock
-      .analyzeHoldingDecision(h.symbol, {
-        buyPrice: h.buyPrice,
-        shares: h.shares,
-        currentPrice: price,
-      })
-      .catch(() => null);
-    const adviceData: { advice?: string; adviceAt?: Date } = advice
-      ? { advice: JSON.stringify(advice), adviceAt: now }
-      : {};
-
     // 尚无基准价 → 仅建立基准，不记账
     if (h.lastPrice == null || !(h.lastPrice > 0)) {
       await this.prisma.stockHolding.update({
         where: { id: h.id },
-        data: { lastPrice: price, lastCalcAt: now, ...adviceData },
+        data: { lastPrice: price, lastCalcAt: now },
       });
       return;
     }
@@ -170,7 +158,7 @@ export class StockHoldingService implements OnModuleInit {
       // 无变化（停牌/周末/休市）→ 仅推进结算时间（仍更新持仓建议）
       await this.prisma.stockHolding.update({
         where: { id: h.id },
-        data: { lastPrice: price, lastCalcAt: now, ...adviceData },
+        data: { lastPrice: price, lastCalcAt: now },
       });
       return;
     }
@@ -213,7 +201,7 @@ export class StockHoldingService implements OnModuleInit {
       }
       await tx.stockHolding.update({
         where: { id: h.id },
-        data: { lastPrice: price, lastCalcAt: now, ...adviceData },
+        data: { lastPrice: price, lastCalcAt: now },
       });
     });
     this.logger.log(

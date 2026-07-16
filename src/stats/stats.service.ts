@@ -114,11 +114,31 @@ export class StatsService {
       .filter((a) => a.ownerId !== null && a.ownerId !== userId)
       .reduce((s, a) => s + Number(a.balance), 0);
     const familyTotal = mineTotal + sharedTotal + othersTotal;
+
+    // ─── 借贷并入净资产：应收(借出未收)=资产、应付(借入未还)=负债 ───
+    // 借出本金会从账户余额扣掉，但钱仍是你的（对方欠你），必须作为债权加回；
+    // 借入本金会加进账户余额，但那是欠别人的，必须作为负债减掉。
+    const loanRows = await this.prisma.loan.findMany({
+      where: { ledgerId, settledAt: null },
+      select: { direction: true, amount: true, repaidAmount: true },
+    });
+    let receivable = 0;
+    let payable = 0;
+    for (const l of loanRows) {
+      const out = Math.max(0, Number(l.amount) - Number(l.repaidAmount));
+      if (l.direction === 'lend') receivable += out;
+      else payable += out;
+    }
+    const netWorth = familyTotal + receivable - payable;
+
     const assetSummary = {
-      total: familyTotal,
+      total: familyTotal, // 账户余额合计（可动用口径，前端账户 tab 仍用它）
       mine: mineTotal,
       shared: sharedTotal,
       others: othersTotal,
+      receivable, // 债权：借出未收回
+      payable, // 负债：借入未还
+      netWorth, // 净资产 = 账户余额 + 债权 − 负债
     };
 
     // ─── 资产趋势：按家庭口径（全部账户）倒推 ─────────────────

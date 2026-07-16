@@ -258,12 +258,29 @@ model Bill {
   /// 银行流水的「联机余额」（该笔交易后的账户余额）。仅银行类导入有；
   /// 用作高精度去重的天然唯一键，最新一笔还可用来校准账户余额。
   bankBalance Decimal? @db.Decimal(15, 2)
+  /// 导入流水的商户名哈希（sha256(规整后商户名)，不存明文）。
+  /// 用户改这笔账单的分类时借它记住"该商户 → 分类"，下次导入自动套用。
+  merchantHash String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@index([ledgerId, date(sort: Desc)])
   @@index([ledgerId, externalId])
   @@index([ledgerId, accountId, date])
+}
+
+/// 分类纠正记忆：商户(哈希) → 用户改过的分类。
+/// AI 导入解析时优先查这里，让"用户修正一次，以后都对"。
+model CategoryCorrection {
+  id           String   @id @default(cuid())
+  ledgerId     String
+  merchantHash String
+  categoryId   String
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  @@unique([ledgerId, merchantHash])
+  @@index([ledgerId])
 }
 
 model AiImport {

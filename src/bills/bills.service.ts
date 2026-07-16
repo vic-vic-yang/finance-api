@@ -203,6 +203,30 @@ export class BillsService {
           data: { balance: { decrement: newAmount } },
         });
       }
+
+      // 分类纠正记忆：用户改了导入账单（带商户哈希）的分类 → 记住"该商户 → 新分类"，
+      // 下次 AI 导入同商户直接套用，不再重复犯错
+      if (
+        dto.categoryId &&
+        dto.categoryId !== existing.categoryId &&
+        existing.merchantHash
+      ) {
+        await tx.categoryCorrection.upsert({
+          where: {
+            ledgerId_merchantHash: {
+              ledgerId,
+              merchantHash: existing.merchantHash,
+            },
+          },
+          create: {
+            ledgerId,
+            merchantHash: existing.merchantHash,
+            categoryId: dto.categoryId,
+          },
+          update: { categoryId: dto.categoryId },
+        });
+      }
+
       return { message: '更新成功', bill: this.serialize(bill) };
     });
   }

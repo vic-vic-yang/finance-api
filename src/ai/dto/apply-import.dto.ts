@@ -59,6 +59,11 @@ export class ApplyBillItemDto {
   @IsNumber()
   @IsOptional()
   bankBalance?: number;
+
+  /** 商户名哈希（服务端解析时算好、客户端原样回传）；分类纠正记忆用 */
+  @IsString()
+  @IsOptional()
+  merchantHash?: string;
 }
 
 export class ApplyTransferItemDto {

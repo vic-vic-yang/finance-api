@@ -549,41 +549,11 @@ export class StockService {
     const resolved = await this.resolve(q);
     const symbol = resolved.symbol.toUpperCase();
 
-    // 先拿行情（含公司名），再取公司新闻（A股/港股走东方财富，美股走 Yahoo）
+    // 行情（含公司名）。已聚焦「记账/持仓」，不再做 AI 选股分析与资讯。
     const quote = await this.fetchQuote(resolved.symbol);
-    const rawNews = await this.getCompanyNews(quote);
-
-    // 上次快照（同用户同股票）作对比上下文
-    const prior = await this.prisma.stockAnalysis.findFirst({
-      where: { userId, symbol },
-      orderBy: { createdAt: 'desc' },
-    });
-    const priorCtx = prior
-      ? {
-          date: prior.createdAt.toISOString().slice(0, 10),
-          price: (prior.quote as any)?.price,
-          pe: (prior.quote as any)?.pe,
-          target: (prior.quote as any)?.targetMean,
-        }
-      : undefined;
-
-    // 持仓：让分析结合用户成本与盈亏给操作建议
     const holding = await this.getHolding(userId, symbol);
 
-    const [analysis, newsProc] = await Promise.all([
-      this.analyze(
-        quote,
-        quote.summary,
-        rawNews.map((n) => n.title),
-        priorCtx,
-        holding,
-      ),
-      this.processNews(quote.name, rawNews),
-    ]);
-    quote.nameZh = newsProc.nameZh || null;
-    const newsOut = newsProc.news;
-
-    // 存快照（analysis 结构化对象，以 JSON 字符串存进 String 列）+ 修剪历史
+    // 存快照（仅名称 + 行情，供持仓列表取名/最新价用）+ 修剪历史
     const row = await this.prisma.stockAnalysis.create({
       data: {
         userId,
@@ -591,8 +561,6 @@ export class StockService {
         name: quote.name || null,
         nameZh: quote.nameZh || null,
         quote: quote as any,
-        analysis: JSON.stringify(analysis),
-        news: newsOut as any,
       },
       select: { createdAt: true },
     });
@@ -600,8 +568,8 @@ export class StockService {
 
     return {
       quote,
-      analysis,
-      news: newsOut,
+      analysis: this.emptyAnalysis(),
+      news: [],
       updatedAt: row.createdAt.toISOString(),
       holding,
     };

@@ -18,11 +18,9 @@ import { InsightsModule } from './insights/insights.module';
 import { GoalsModule } from './goals/goals.module';
 import { CfoModule } from './cfo/cfo.module';
 import { ToolsModule } from './tools/tools.module';
-import { NewsModule } from './news/news.module';
 import { AppUpdateModule } from './app-update/app-update.module';
 import { LoansModule } from './loans/loans.module';
 import { UploadsModule } from './uploads/uploads.module';
-import { PicksModule } from './picks/picks.module';
 
 @Module({
   imports: [
@@ -48,11 +46,9 @@ import { PicksModule } from './picks/picks.module';
     GoalsModule,
     CfoModule,
     ToolsModule,
-    NewsModule,
     AppUpdateModule,
     LoansModule,
     UploadsModule,
-    PicksModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
