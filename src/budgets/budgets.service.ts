@@ -19,12 +19,10 @@ export class BudgetsService {
     const enriched = await Promise.all(
       budgets.map(async (b) => {
         const [periodStart, periodEnd] = this.computePeriod(b.period, now);
-        const spent = await this._spentOf(
-          ledgerId,
-          b.categoryId,
-          periodStart,
-          periodEnd,
-        );
+        const [spent, members] = await Promise.all([
+          this._spentOf(ledgerId, b.categoryId, periodStart, periodEnd),
+          this._spentByMemberOf(ledgerId, b.categoryId, periodStart, periodEnd),
+        ]);
         const amount = Number(b.amount);
         const remaining = amount - spent;
         const progress = amount > 0 ? Math.min(spent / amount, 999) : 0;
@@ -35,10 +33,56 @@ export class BudgetsService {
           progress, // 0~1+，>1 表示超支
           periodStart: periodStart.toISOString(),
           periodEnd: periodEnd.toISOString(),
+          // 共同预算：按记账人拆解（单人账本就一条，前端 ≥2 人才显示）
+          members,
         };
       }),
     );
     return { budgets: enriched };
+  }
+
+  /** 某预算周期内按「记账人」拆解的支出（家庭共同预算：谁花了多少） */
+  private async _spentByMemberOf(
+    ledgerId: string,
+    categoryId: string | null,
+    start: Date,
+    end: Date,
+  ): Promise<{ userId: string; name: string; spent: number }[]> {
+    const ids: string[] = [];
+    if (categoryId) {
+      ids.push(categoryId);
+      const children = await this.prisma.category.findMany({
+        where: { parentId: categoryId },
+        select: { id: true },
+      });
+      ids.push(...children.map((c) => c.id));
+    }
+    const rows = await this.prisma.bill.groupBy({
+      by: ['userId'],
+      where: {
+        ledgerId,
+        type: 'expense',
+        isTransfer: false,
+        date: { gte: start, lte: end },
+        ...(ids.length ? { categoryId: { in: ids } } : {}),
+      },
+      _sum: { amount: true },
+    });
+    if (rows.length === 0) return [];
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: rows.map((r) => r.userId) } },
+      select: { id: true, username: true, nickname: true },
+    });
+    const nameById = new Map(
+      users.map((u) => [u.id, u.nickname || u.username]),
+    );
+    return rows
+      .map((r) => ({
+        userId: r.userId,
+        name: nameById.get(r.userId) ?? '成员',
+        spent: Number(r._sum.amount || 0),
+      }))
+      .sort((a, b) => b.spent - a.spent);
   }
 
   /**

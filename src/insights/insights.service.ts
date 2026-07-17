@@ -249,13 +249,18 @@ export class InsightsService {
     return insights;
   }
 
-  /** 预算预警：使用率 70/90/100% 三档 */
+  /** 预算预警：使用率 70/90/100% 三档；共享账本追加"大头是谁" */
   private async _detectBudgetAlerts(ledgerId: string): Promise<Insight[]> {
     const budgets = await this.prisma.budget.findMany({
       where: { ledgerId, categoryId: { not: null } },
       include: { category: { select: { name: true, icon: true } } },
     });
     if (budgets.length === 0) return [];
+
+    // 共享账本（≥2 成员）才需要按成员拆"谁花的"
+    const memberCount = await this.prisma.ledgerMember.count({
+      where: { ledgerId },
+    });
 
     const now = new Date();
     const insights: Insight[] = [];
@@ -299,13 +304,43 @@ export class InsightsService {
         rate >= 1
           ? `已超 ¥${(spent - limit).toFixed(0)}`
           : `剩 ¥${(limit - spent).toFixed(0)}`;
+
+      // 共享账本：报一下大头是谁（花费第一名占比 ≥60% 才点名，避免五五开时甩锅）
+      let whoText = '';
+      if (memberCount > 1 && spent > 0) {
+        const byUser = await this.prisma.bill.groupBy({
+          by: ['userId'],
+          where: {
+            ledgerId,
+            type: 'expense',
+            isTransfer: false,
+            categoryId: { in: ids },
+            date: { gte: start, lte: end },
+          },
+          _sum: { amount: true },
+        });
+        if (byUser.length > 1) {
+          const top = byUser
+            .map((r) => ({ userId: r.userId, v: Number(r._sum.amount || 0) }))
+            .sort((a, b2) => b2.v - a.v)[0];
+          if (top.v / spent >= 0.6) {
+            const u = await this.prisma.user.findUnique({
+              where: { id: top.userId },
+              select: { nickname: true, username: true },
+            });
+            const name = u?.nickname || u?.username;
+            if (name) whoText = ` · 大头是${name}（¥${top.v.toFixed(0)}）`;
+          }
+        }
+      }
+
       insights.push({
         id: `budget_alert|${b.id}_${bucket}`,
         type: 'budget_alert',
         severity,
         target: `${b.id}_${bucket}`,
         title: `${rate >= 1 ? '🔴' : rate >= 0.9 ? '🟠' : '💡'} ${label}${periodLabel}预算已用 ${Math.round(rate * 100)}%`,
-        body: `预算 ¥${limit.toFixed(0)} · 已花 ¥${spent.toFixed(0)} · ${overText}`,
+        body: `预算 ¥${limit.toFixed(0)} · 已花 ¥${spent.toFixed(0)} · ${overText}${whoText}`,
         data: { budgetId: b.id, categoryId: b.categoryId, spent, limit, rate },
       });
     }
