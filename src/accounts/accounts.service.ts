@@ -479,25 +479,56 @@ export class AccountsService {
         Math.min(dueDay, daysInMonth(lastStmt.getFullYear(), lastStmt.getMonth() + 1)),
       );
     }
-    const billAgg = await this.prisma.bill.aggregate({
-      where: { accountId: a.id, ledgerId: a.ledgerId, type: 'expense', date: { gte: periodStart, lte: periodEnd } },
-      _sum: { amount: true },
-    });
-    const periodBill = Number(billAgg._sum.amount || 0);
+    // 本期账单 = 出账日(periodEnd)那一刻的总欠款，按 初始余额 + 出账日前全部流水 复原。
+    // 不能只加账期窗口内的支出：开户带进来的「初始欠款」也在这期账单里
+    // （例：初始欠 901.11 + 账期内消费 953.35 → 真实账单 1854.46）。
+    const [expAgg, incAgg] = await Promise.all([
+      this.prisma.bill.aggregate({
+        where: { accountId: a.id, ledgerId: a.ledgerId, type: 'expense', date: { lte: periodEnd } },
+        _sum: { amount: true },
+      }),
+      this.prisma.bill.aggregate({
+        where: { accountId: a.id, ledgerId: a.ledgerId, type: 'income', date: { lte: periodEnd } },
+        _sum: { amount: true },
+      }),
+    ]);
+    const balAtStmt =
+      Number(a.initialBalance ?? 0) +
+      Number(incAgg._sum.amount || 0) -
+      Number(expAgg._sum.amount || 0);
+    const periodBill = Math.max(0, -balAtStmt);
     const balance = Number(a.balance);
     const owed = balance < 0 ? -balance : 0;
-    const paid = Math.max(0, periodBill - owed);
-    const unpaid = Math.max(0, periodBill - paid);
-    const daysToDue = Math.ceil((dueDate.getTime() - today.getTime()) / 86400000);
     const ongoingAgg = await this.prisma.bill.aggregate({
       where: { accountId: a.id, ledgerId: a.ledgerId, type: 'expense', date: { gt: periodEnd, lte: endOfDay(today) } },
       _sum: { amount: true },
     });
     const ongoingSpent = Number(ongoingAgg._sum.amount || 0);
+    // 未还 = 当前总欠款刨掉「下期未出账」的部分（还款先冲抵本期已出账）。
+    // 之前误用 periodBill − owed：未出账也被当成本期没还，还清了仍显示"未还/逾期"。
+    const unpaid = Math.max(0, owed - ongoingSpent);
+    const paid = Math.max(0, periodBill - unpaid);
     let nextStmt = new Date(today.getFullYear(), today.getMonth(), Math.min(stmtDay, daysInMonth(today.getFullYear(), today.getMonth())));
     if (nextStmt <= today) {
       nextStmt = new Date(today.getFullYear(), today.getMonth() + 1, Math.min(stmtDay, daysInMonth(today.getFullYear(), today.getMonth() + 1)));
     }
+    // 本期已还清且还款日已过 → 「下次还款」滚到下一期（下个账单日之后的还款日），
+    // 避免显示"剩 -11 天"这种已完结账期的负倒计时
+    if (unpaid < 0.01 && dueDate < today) {
+      dueDate = new Date(
+        nextStmt.getFullYear(),
+        nextStmt.getMonth(),
+        Math.min(dueDay, daysInMonth(nextStmt.getFullYear(), nextStmt.getMonth())),
+      );
+      if (dueDate <= nextStmt) {
+        dueDate = new Date(
+          nextStmt.getFullYear(),
+          nextStmt.getMonth() + 1,
+          Math.min(dueDay, daysInMonth(nextStmt.getFullYear(), nextStmt.getMonth() + 1)),
+        );
+      }
+    }
+    const daysToDue = Math.ceil((dueDate.getTime() - today.getTime()) / 86400000);
     return {
       kind: 'credit',
       periodStart: periodStart.toISOString(),

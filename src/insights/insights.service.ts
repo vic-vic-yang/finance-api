@@ -17,7 +17,8 @@ export interface Insight {
     | 'anomaly_cat_up'
     | 'anomaly_cat_down'
     | 'budget_alert'
-    | 'recurring_due';
+    | 'recurring_due'
+    | 'credit_due';
   severity: 'info' | 'warning' | 'critical';
   target: string;
   title: string;
@@ -38,19 +39,26 @@ export class InsightsService {
   async list(userId: string, ledgerId: string): Promise<{ insights: Insight[] }> {
     await this.ledgers.ensureMembership(userId, ledgerId);
 
-    const [anomalies, trends, budgetAlerts, recurringDues, dismissals] =
+    const [anomalies, trends, budgetAlerts, recurringDues, creditDues, dismissals] =
       await Promise.all([
         this._detectBillAnomalies(ledgerId),
         this._detectCategoryTrends(ledgerId),
         this._detectBudgetAlerts(ledgerId),
         this._detectRecurringDue(ledgerId),
+        this._detectCreditDue(ledgerId),
         this.prisma.aiInsightDismissal.findMany({
           where: { userId, ledgerId, expireAt: { gt: new Date() } },
           select: { type: true, target: true },
         }),
       ]);
 
-    const all = [...anomalies, ...trends, ...budgetAlerts, ...recurringDues];
+    const all = [
+      ...anomalies,
+      ...trends,
+      ...budgetAlerts,
+      ...recurringDues,
+      ...creditDues,
+    ];
 
     // 过滤"已忽略"
     const dismissedSet = new Set(
@@ -143,15 +151,22 @@ export class InsightsService {
 
       const sev: Insight['severity'] = amt > 5000 ? 'critical' : 'warning';
       const catLabel = b.category?.name ?? '未分类';
+      const d = new Date(b.date);
+      const dateLabel = `${d.getMonth() + 1}月${d.getDate()}日`;
+      // 说人话：倍数太夸张时不报数字（"106.7 倍"没信息量），只说"明显偏大"
+      const multiple = catMean > 0 ? amt / catMean : 0;
+      const body = isOutlier
+        ? multiple >= 10
+          ? `${dateLabel} · 你平时${catLabel}单笔约 ¥${catMean.toFixed(0)}，这笔明显偏大，看一眼是否正常`
+          : `${dateLabel} · 比你平时${catLabel}单笔（约 ¥${catMean.toFixed(0)}）高出约 ${multiple.toFixed(1)} 倍`
+        : `${dateLabel} · 单笔金额不小，确认一下没记错就好`;
       insights.push({
         id: `anomaly_bill|${b.id}`,
         type: 'anomaly_bill',
         severity: sev,
         target: b.id,
-        title: `🔴 大额支出 ¥${amt.toFixed(2)}`,
-        body: isOutlier
-          ? `${catLabel}分类平均 ¥${catMean.toFixed(0)}，这笔是平均的 ${(amt / catMean).toFixed(1)} 倍`
-          : `分类：${catLabel}`,
+        title: `🔴 ${catLabel}大额支出 ¥${amt.toFixed(2)}`,
+        body,
         data: { billId: b.id, amount: amt, categoryId: b.categoryId, date: b.date },
       });
     }
@@ -332,6 +347,102 @@ export class InsightsService {
         ],
       };
     });
+  }
+
+  /** 信用卡还款提醒：有欠款且距还款日 ≤3 天（含已到当天）。
+   *  账户名是密文，文案用泛称；data.accountId 供客户端跳转账户详情。
+   *  target 带年月：同一张卡每个月是新提醒，忽略只对当月生效。 */
+  private async _detectCreditDue(ledgerId: string): Promise<Insight[]> {
+    const cards = await this.prisma.account.findMany({
+      where: { ledgerId, type: 'CREDIT', dueDay: { not: null } },
+      select: { id: true, balance: true, dueDay: true, statementDay: true },
+    });
+    const now = new Date();
+    const insights: Insight[] = [];
+    for (const c of cards) {
+      const totalOwed = Number(c.balance) < 0 ? -Number(c.balance) : 0;
+      if (totalOwed < 0.01) continue;
+      // 本期应还 = 总欠款 − 出账日后的未出账消费（口径与卡详情一致）。
+      // 已还清本期、只剩未出账时不提醒（那是下期的事）。
+      let owed = totalOwed;
+      if (c.statementDay) {
+        const dim0 = new Date(
+          now.getFullYear(),
+          now.getMonth() + 1,
+          0,
+        ).getDate();
+        let lastStmt = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          Math.min(c.statementDay, dim0),
+          23,
+          59,
+          59,
+        );
+        if (lastStmt > now) {
+          const dimPrev = new Date(
+            now.getFullYear(),
+            now.getMonth(),
+            0,
+          ).getDate();
+          lastStmt = new Date(
+            now.getFullYear(),
+            now.getMonth() - 1,
+            Math.min(c.statementDay, dimPrev),
+            23,
+            59,
+            59,
+          );
+        }
+        const ongoingAgg = await this.prisma.bill.aggregate({
+          where: {
+            accountId: c.id,
+            ledgerId,
+            type: 'expense',
+            date: { gt: lastStmt, lte: now },
+          },
+          _sum: { amount: true },
+        });
+        owed = Math.max(
+          0,
+          totalOwed - Number(ongoingAgg._sum.amount || 0),
+        );
+      }
+      if (owed < 0.01) continue;
+      // 下一个还款日（本月 dueDay 已过则取下月）
+      const dim = (y: number, m: number) => new Date(y, m + 1, 0).getDate();
+      let due = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        Math.min(c.dueDay!, dim(now.getFullYear(), now.getMonth())),
+      );
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      if (due < today) {
+        due = new Date(
+          now.getFullYear(),
+          now.getMonth() + 1,
+          Math.min(c.dueDay!, dim(now.getFullYear(), now.getMonth() + 1)),
+        );
+      }
+      const days = Math.round((due.getTime() - today.getTime()) / 86_400_000);
+      if (days > 3) continue;
+
+      const when = days <= 0 ? '就是今天' : days === 1 ? '明天' : `${days} 天后`;
+      const ym = `${due.getFullYear()}${String(due.getMonth() + 1).padStart(2, '0')}`;
+      insights.push({
+        id: `credit_due|${c.id}_${ym}`,
+        type: 'credit_due',
+        severity: days <= 1 ? 'critical' : 'warning',
+        target: `${c.id}_${ym}`,
+        title: `💳 信用卡还款日${when}`,
+        body: `本期待还 ¥${owed.toFixed(2)} · 每月 ${c.dueDay} 号还款`,
+        data: { accountId: c.id, owed, dueDate: due.toISOString() },
+        actions: [
+          { label: '去查看', intent: 'openAccount', params: { accountId: c.id } },
+        ],
+      });
+    }
+    return insights;
   }
 
   // ── 工具 ────────────────────────────────────────────────────

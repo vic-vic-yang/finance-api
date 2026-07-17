@@ -45,28 +45,56 @@ export class OpenAiCompatibleClient implements ChatModel {
     const url = `${this.baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
     const startedAt = Date.now();
 
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(body),
-      });
-    } catch (e) {
-      throw new Error(`LLM[${this.name}] 网络错误: ${e}`);
-    }
+    // 瞬时网络故障（连接被掐断/超时/429/5xx）自动重试：1s、3s 退避后再试，
+    // 共 3 次。注意读响应体也可能断（TypeError: terminated），所以整段都在重试圈里。
+    const MAX_ATTEMPTS = 3;
+    let data: any;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        let res: Response;
+        try {
+          res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            body: JSON.stringify(body),
+            // 单次尝试最长 5 分钟（大流水解析输出长），防挂死
+            signal: AbortSignal.timeout(300_000),
+          });
+        } catch (e) {
+          throw new Error(`LLM[${this.name}] 网络错误: ${e}`);
+        }
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(
-        `LLM[${this.name}] HTTP ${res.status}: ${text.slice(0, 500)}`,
-      );
-    }
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          const err = new Error(
+            `LLM[${this.name}] HTTP ${res.status}: ${text.slice(0, 500)}`,
+          );
+          // 429/5xx 值得重试；4xx（参数/鉴权错）重试也没用
+          (err as any).retryable = res.status === 429 || res.status >= 500;
+          throw err;
+        }
 
-    const data = (await res.json()) as any;
+        // 读响应体：连接中途断开会在这里抛 TypeError: terminated
+        data = (await res.json()) as any;
+        break;
+      } catch (e: any) {
+        const msg = String(e?.message ?? e);
+        const retryable =
+          (e as any)?.retryable === true ||
+          /terminated|aborted|timeout|fetch failed|network|ECONNRESET|ECONNREFUSED|socket|EPIPE|UND_ERR/i.test(
+            msg,
+          );
+        if (!retryable || attempt >= MAX_ATTEMPTS) throw e;
+        const delay = attempt === 1 ? 1000 : 3000;
+        this.logger.warn(
+          `chat [${this.name}] 第 ${attempt} 次失败(${msg.slice(0, 120)})，${delay}ms 后重试…`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
     const msg = data?.choices?.[0]?.message ?? {};
     const finishReason = data?.choices?.[0]?.finish_reason as string | undefined;
 
