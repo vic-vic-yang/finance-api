@@ -40,18 +40,45 @@ export class BillsService {
   async findAll(ledgerId: string, query: QueryBillDto) {
     const {
       page = 1, limit = 20, type, categoryId, accountId, userId, startDate, endDate,
+      minAmount, maxAmount, categoryIds, accountIds, userIds,
     } = query;
     const skip = (page - 1) * Number(limit);
 
     const where: Prisma.BillWhereInput = { ledgerId };
     if (type) where.type = type;
-    if (categoryId) where.categoryId = categoryId;
-    if (accountId) where.accountId = accountId;
-    if (userId) where.userId = userId;
+    // 分类筛选（多选优先）：一级分类自动带上其子分类（与预算/统计口径一致）
+    const catList = (categoryIds ?? categoryId ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (catList.length) {
+      const children = await this.prisma.category.findMany({
+        where: { parentId: { in: catList } },
+        select: { id: true },
+      });
+      where.categoryId = {
+        in: [...catList, ...children.map((c) => c.id)],
+      };
+    }
+    const accList = (accountIds ?? accountId ?? '')
+      .split(',').map((x) => x.trim()).filter(Boolean);
+    if (accList.length) {
+      where.accountId = accList.length === 1 ? accList[0] : { in: accList };
+    }
+    const userList = (userIds ?? userId ?? '')
+      .split(',').map((x) => x.trim()).filter(Boolean);
+    if (userList.length) {
+      where.userId = userList.length === 1 ? userList[0] : { in: userList };
+    }
     if (startDate || endDate) {
       where.date = {};
       if (startDate) (where.date as any).gte = new Date(startDate);
       if (endDate) (where.date as any).lte = new Date(`${endDate}T23:59:59.999`);
+    }
+    if (minAmount != null || maxAmount != null) {
+      where.amount = {};
+      if (minAmount != null) (where.amount as any).gte = minAmount;
+      if (maxAmount != null) (where.amount as any).lte = maxAmount;
     }
 
     const [bills, total, incomeAgg, expenseAgg] = await Promise.all([

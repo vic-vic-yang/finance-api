@@ -724,6 +724,79 @@ export class StockService {
    * 列表：该用户每只股票的最新一条快照（轻量字段）。
    * 价格/涨跌幅实时拉最新价覆盖（拉不到再回退快照），让列表与详情一致、不再停在旧快照。
    */
+  // ── AI 持仓解读（合规安全线：只做数据解读+风险提示，禁止买卖建议）──
+  /** 每用户每天缓存一份，避免反复烧 token */
+  private readonly insightCache = new Map<
+    string,
+    { day: string; text: string; at: string }
+  >();
+
+  async portfolioInsight(userId: string, force = false) {
+    const day = new Date().toISOString().slice(0, 10);
+    const cached = this.insightCache.get(userId);
+    if (!force && cached && cached.day === day) {
+      return { text: cached.text, generatedAt: cached.at, cached: true };
+    }
+
+    const rows = (await this.list(userId)).filter(
+      (r: any) => r.held && (r.buyPrice ?? 0) > 0 && (r.shares ?? 0) > 0,
+    );
+    if (rows.length === 0) {
+      throw new NotFoundException('还没有持仓，添加后再来看解读');
+    }
+
+    const modelName = this.llms.defaultTextModelName();
+    if (!modelName) {
+      return {
+        text: '尚未配置 AI 模型，无法生成解读。',
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    let totCost = 0;
+    let totMv = 0;
+    const lines = rows.map((r: any) => {
+      const cost = r.buyPrice * r.shares;
+      const mv = (r.price ?? r.buyPrice) * r.shares;
+      totCost += cost;
+      totMv += mv;
+      const pnlPct = cost > 0 ? (((mv - cost) / cost) * 100).toFixed(1) : '0';
+      const w = r.nameZh || r.name || r.symbol;
+      return `${w}(${r.symbol}): 持股${r.shares}, 成本价${r.buyPrice}, 现价${r.price ?? '?'}, 今日${r.changePercent != null ? r.changePercent.toFixed(2) + '%' : '?'}, 累计盈亏${pnlPct}%, 市值${mv.toFixed(0)}`;
+    });
+    const totPnl = totMv - totCost;
+    const facts =
+      `组合共 ${rows.length} 只，总成本 ${totCost.toFixed(0)}，总市值 ${totMv.toFixed(0)}，` +
+      `累计盈亏 ${totPnl.toFixed(0)}（${totCost > 0 ? ((totPnl / totCost) * 100).toFixed(1) : 0}%）。\n` +
+      lines.join('\n');
+
+    try {
+      const res = await this.llms.get(modelName).chat(
+        [
+          {
+            role: 'system',
+            content:
+              '你是一名严谨的组合风险分析师，只做客观的数据解读与风险教育。' +
+              '【硬性红线】禁止给出任何买入/卖出/加仓/减仓/止损/择时等操作建议；' +
+              '禁止预测未来涨跌；禁止推荐任何证券。违反即失败。' +
+              '输出简洁的中文 Markdown（280字以内），结构：' +
+              '1) **组合概览**（一两句，盈亏主要来自哪只）；' +
+              '2) **风险观察**（集中度/单一标的占比/波动性等客观事实提示）；' +
+              '3) **常识提醒**（如分散、仓位与个人现金流匹配等通用理财常识）。' +
+              '结尾固定加一行斜体：*以上为数据解读与理财常识，不构成任何投资建议。*',
+          },
+          { role: 'user', content: facts },
+        ],
+        { maxTokens: 700, temperature: 0.3 },
+      );
+      const at = new Date().toISOString();
+      this.insightCache.set(userId, { day, text: res.content, at });
+      return { text: res.content, generatedAt: at, cached: false };
+    } catch (e: any) {
+      throw new Error(`生成解读失败：${e?.message ?? e}`);
+    }
+  }
+
   async list(userId: string) {
     const [rows, holdings] = await Promise.all([
       this.prisma.stockAnalysis.findMany({

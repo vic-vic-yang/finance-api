@@ -36,6 +36,12 @@ export class ToolsController {
     return this.stock.list(req.user.id);
   }
 
+  /** GET /api/tools/holdings/insight —— AI 持仓解读（数据解读+风险提示，无操作建议） */
+  @Get('holdings/insight')
+  holdingsInsight(@Request() req, @Query('force') force?: string) {
+    return this.stock.portfolioInsight(req.user.id, force === '1');
+  }
+
   /** GET /api/tools/holdings/pnl-daily?days=30 —— 组合每日总盈亏 */
   @Get('holdings/pnl-daily')
   pnlDaily(@Request() req, @Query('days') days?: string) {
