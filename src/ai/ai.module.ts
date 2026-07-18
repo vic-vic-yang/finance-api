@@ -8,11 +8,12 @@ import { AiController } from './ai.controller';
 import { AiService } from './ai.service';
 import { ChatService } from './chat.service';
 import { LlmRegistry } from './llm/llm-registry';
+import { LlmResolver } from './llm/llm-resolver';
 
 @Module({
   imports: [ConfigModule, LedgersModule, AccountsModule, CfoModule, LoansModule],
   controllers: [AiController],
-  providers: [AiService, ChatService, LlmRegistry],
-  exports: [AiService, ChatService, LlmRegistry],
+  providers: [AiService, ChatService, LlmRegistry, LlmResolver],
+  exports: [AiService, ChatService, LlmRegistry, LlmResolver],
 })
 export class AiModule {}

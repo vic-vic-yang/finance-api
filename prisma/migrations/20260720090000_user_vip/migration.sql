@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN "role" TEXT NOT NULL DEFAULT 'user',
+ADD COLUMN "vipTier" TEXT NOT NULL DEFAULT 'free',
+ADD COLUMN "vipExpiresAt" TIMESTAMP(3),
+ADD COLUMN "vipNote" TEXT;

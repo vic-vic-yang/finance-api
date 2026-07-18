@@ -7,11 +7,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// 账单类型：收入 / 支出
 enum BillType {
   income
   expense
 }
 
+/// 账户类型：区分现金/银行卡/虚拟账户/信用卡/投资/社保/负债等
 enum AccountType {
   CASH // 现金
   BANK // 银行卡（储蓄卡/借记卡/存折）
@@ -26,16 +28,19 @@ enum AccountType {
   WECHAT
 }
 
+/// 预算周期：月度 / 年度
 enum BudgetPeriod {
   MONTHLY
   YEARLY
 }
 
+/// 账本角色：owner（拥有者） / member（成员）
 enum LedgerRole {
   owner
   member
 }
 
+/// AI 导入状态机：从上传到入库的完整生命周期
 enum AiImportStatus {
   pending // 已上传，待处理
   extracting // 提取文件内容（OCR / 解 CSV / 读 PDF）
@@ -48,14 +53,25 @@ enum AiImportStatus {
   partial // 部分成功
 }
 
+/// 用户表：注册/登录/端到端加密密钥对/VIP/角色管理的核心实体
 model User {
   id              String         @id @default(cuid())
   username        String         @unique
   /// 用户昵称，显示用；为空时回退到 username
   nickname        String?
+  /// 角色：user / admin（admin 可进管理后台、天然享受服务端默认 AI）
+  role            String         @default("user")
+  /// VIP 等级：free / vip（预留扩展：pro / premium…）。VIP 可用服务端默认 AI 配置
+  vipTier         String         @default("free")
+  /// VIP 到期时间；null = 永久（tier 非 free 时）
+  vipExpiresAt    DateTime?
+  /// VIP 备注（来源：手动开通 / 活动 / 付费单号…）
+  vipNote         String?
+  /// bcrypt 密码哈希（12 rounds）
   password        String
   createdAt       DateTime       @default(now())
-  currentLedgerId String? // 当前活动账本
+  /// 当前活动账本 ID
+  currentLedgerId String?
   currentLedger   Ledger?        @relation("CurrentLedger", fields: [currentLedgerId], references: [id], onDelete: SetNull)
   ownedLedgers    Ledger[]       @relation("OwnedLedgers")
   ledgerMembers   LedgerMember[]
@@ -77,13 +93,18 @@ model User {
   recoveryHash      Bytes?
 }
 
+/// 账本：个人或共享的财务管理容器，拥有自己的账户/分类/账单/预算/成员体系
 model Ledger {
   id         String          @id @default(cuid())
+  /// 账本名称
   name       String
-  icon       String? // emoji
+  /// 账本图标（emoji）
+  icon       String?
+  /// 拥有者用户 ID
   ownerId    String
   owner      User            @relation("OwnedLedgers", fields: [ownerId], references: [id], onDelete: Cascade)
-  isPersonal Boolean         @default(false) // true=个人默认账本，不可删除/退出
+  /// true=个人默认账本，注册时自动创建，不可删除/退出
+  isPersonal Boolean         @default(false)
   createdAt  DateTime        @default(now())
   members    LedgerMember[]
   invites    LedgerInvite[]
@@ -99,6 +120,7 @@ model Ledger {
   @@index([ownerId])
 }
 
+/// 账本成员：记录成员角色、DEK 信封加密数据
 model LedgerMember {
   id       String     @id @default(cuid())
   ledgerId String
@@ -119,13 +141,18 @@ model LedgerMember {
   @@index([userId])
 }
 
+/// 账本邀请码：6 位唯一码，供其他用户扫描加入共享账本
 model LedgerInvite {
   id        String    @id @default(cuid())
   ledgerId  String
   ledger    Ledger    @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 6 位唯一邀请码
   code      String    @unique
+  /// 创建者用户 ID
   createdBy String
+  /// 过期时间
   expiresAt DateTime
+  /// 使用该邀请码加入的用户 ID
   usedBy    String?
   usedAt    DateTime?
   createdAt DateTime  @default(now())
@@ -133,29 +160,33 @@ model LedgerInvite {
   @@index([ledgerId])
 }
 
+/// 账户：账本下的资金账户，支持信用卡/负债/自动入账等多种类型
 model Account {
-  id         String          @id @default(cuid())
-  ledgerId   String
-  ledger     Ledger          @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  id             String          @id @default(cuid())
+  ledgerId       String
+  ledger         Ledger          @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
   /// 账户所有者：null = 共享账户（账本内所有成员可用）；非空 = 私人账户（仅本人可见可用）
-  ownerId    String?
-  owner      User?           @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  ownerId        String?
+  owner          User?           @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   /// 账户名密文（SM4-CBC + SM3-HMAC, iv||ct||mac 一体）。
   /// 服务端永不解密；客户端用账本 DEK 解。
-  nameCipher Bytes
+  nameCipher     Bytes
   /// 加密时使用的 DEK 版本（用于密钥轮换）
-  nameDekVer Int             @default(1)
-  type       AccountType
-  balance    Decimal         @default(0) @db.Decimal(15, 2)
+  nameDekVer     Int             @default(1)
+  type           AccountType
+  /// 当前余额（Decimal 15,2 精度）
+  balance        Decimal         @default(0) @db.Decimal(15, 2)
   /// 初始余额（建账时录入；老账户由 当前余额 − 历史净收支 回填）
-  initialBalance Decimal     @default(0) @db.Decimal(15, 2)
-  icon       String?
-  color      String?
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
-  bills      Bill[]
-  recurring  RecurringBill[]
-  goals      SavingsGoal[]
+  initialBalance Decimal         @default(0) @db.Decimal(15, 2)
+  /// 图标（emoji）
+  icon           String?
+  /// 颜色（hex）
+  color          String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  bills          Bill[]
+  recurring      RecurringBill[]
+  goals          SavingsGoal[]
 
   // ── 信用卡专用 ─────────────────────────────────────────────
   /// 账单日（1-31）：每月这一天出账
@@ -180,7 +211,7 @@ model Account {
   // ── 自动入账（社保 / 公积金 / 工资固定到账）专用 ─────────
   /// 每月自动入账日（1-31）
   autoDepositDay        Int?
-  /// 每月自动入账金额
+  /// 每月自动入账金额（正数）
   autoDepositAmount     Decimal?  @db.Decimal(15, 2)
   /// 自动入账记入哪个分类（可选；为空时后端用"其他收入"系统分类）
   autoDepositCategoryId String?
@@ -191,20 +222,29 @@ model Account {
   @@index([ownerId])
 }
 
+/// 分类：系统全局分类 + 账本自定义分类，支持二级层级
 model Category {
   id        String   @id @default(cuid())
-  ledgerId  String? // null = 系统分类（全局共享）
+  /// null = 系统分类（全局共享，所有账本可见）
+  ledgerId  String?
   ledger    Ledger?  @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
-  userId    String? // 创建者，便于审计；null 表示系统
+  /// 创建者用户 ID；null = 系统分类
+  userId    String?
   user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  /// 分类名称
   name      String
+  /// 类型：income / expense
   type      BillType
+  /// 图标（emoji）
   icon      String?
+  /// 颜色（hex）
   color     String?
+  /// 是否为系统预置分类
   isSystem  Boolean  @default(false)
   createdAt DateTime @default(now())
 
   // —— 二级分类支持：parentId 为空 = 一级分类 ——
+  /// 父分类 ID（null=一级分类）
   parentId String?
   parent   Category?  @relation("CategoryChildren", fields: [parentId], references: [id], onDelete: Cascade)
   children Category[] @relation("CategoryChildren")
@@ -217,13 +257,36 @@ model Category {
   @@index([parentId])
 }
 
-/// 按账本的分类自定义排序。
-/// 系统分类全局共享（ledgerId=null），无法在 Category 上存「每个账本各自的顺序」，
-/// 故用本表为某账本记录某分类的次序（sortOrder 越小越靠前）。仅作展示排序覆盖用。
+/// 账本共享的 LLM 配置（BYOK）：一名成员配置并共享后，本账本所有成员的
+/// AI 功能都用这份配置调用。apiKeyEnc 用服务端密钥 AES-256-GCM 加密落库。
+model LedgerLlmConfig {
+  id            String   @id @default(cuid())
+  /// 关联账本（每账本最多一条配置）
+  ledgerId      String   @unique
+  /// 配置者用户 ID（只有此人可改/删）
+  ownerUserId   String
+  /// 服务商：deepseek / qwen / kimi / glm / custom
+  provider      String   @default("custom")
+  /// API 端点地址
+  baseUrl       String
+  /// 文本模型名
+  modelId       String
+  /// 视觉模型名（可选）
+  visionModelId String?
+  /// AES-256-GCM 加密后的 API Key
+  apiKeyEnc     String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([ownerUserId])
+}
+
+/// 分类自定义排序：记录每个账本对分类的排序顺序，覆盖全局默认顺序
 model CategorySort {
   id         String   @id @default(cuid())
   ledgerId   String
   categoryId String
+  /// 排序序号（越小越靠前）
   sortOrder  Int
   createdAt  DateTime @default(now())
 
@@ -231,50 +294,59 @@ model CategorySort {
   @@index([ledgerId])
 }
 
+/// 账单流水：每笔收入/支出/转账的记录，余额联动核心实体
 model Bill {
-  id         String   @id @default(cuid())
-  ledgerId   String
-  ledger     Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
-  userId     String // 记账人，多账本时显示"谁记的"
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accountId  String
-  account    Account  @relation(fields: [accountId], references: [id])
-  categoryId String
-  category   Category @relation(fields: [categoryId], references: [id])
-  type       BillType
-  amount     Decimal  @db.Decimal(15, 2)
+  id           String   @id @default(cuid())
+  ledgerId     String
+  ledger       Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 记账用户 ID（多账本时显示"谁记的"）
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 关联账户 ID
+  accountId    String
+  account      Account  @relation(fields: [accountId], references: [id])
+  /// 关联分类 ID
+  categoryId   String
+  category     Category @relation(fields: [categoryId], references: [id])
+  /// 类型：income / expense
+  type         BillType
+  /// 金额（正数，Decimal 15,2）
+  amount       Decimal  @db.Decimal(15, 2)
   /// 备注密文（SM4-CBC + SM3-HMAC, iv||ct||mac 一体）。
   /// 空备注也加密为一个固定密文（避免空字段泄露"无备注"信息）
-  noteCipher Bytes
+  noteCipher   Bytes
   /// 加密所用 DEK 版本
-  noteDekVer Int      @default(1)
-  date       DateTime
+  noteDekVer   Int      @default(1)
+  /// 交易日期
+  date         DateTime
   /// 平台交易订单号（支付宝/微信），用于同源稳健去重；非平台来源为 null
-  externalId String?
+  externalId   String?
   /// 来源渠道：alipay / wechat / bank / manual
-  source     String   @default("manual")
+  source       String   @default("manual")
   /// 是否为转账账单（账户间转账拆成的一收一支）。转账不计入收支统计/预算，但在账单列表可见。
-  isTransfer Boolean  @default(false)
+  isTransfer   Boolean  @default(false)
   /// 银行流水的「联机余额」（该笔交易后的账户余额）。仅银行类导入有；
   /// 用作高精度去重的天然唯一键，最新一笔还可用来校准账户余额。
-  bankBalance Decimal? @db.Decimal(15, 2)
+  bankBalance  Decimal? @db.Decimal(15, 2)
   /// 导入流水的商户名哈希（sha256(规整后商户名)，不存明文）。
   /// 用户改这笔账单的分类时借它记住"该商户 → 分类"，下次导入自动套用。
   merchantHash String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([ledgerId, date(sort: Desc)])
   @@index([ledgerId, externalId])
   @@index([ledgerId, accountId, date])
 }
 
-/// 分类纠正记忆：商户(哈希) → 用户改过的分类。
-/// AI 导入解析时优先查这里，让"用户修正一次，以后都对"。
+/// 分类纠正记忆：商户(哈希) → 用户手动修正的分类。
+/// AI 导入解析时优先查这里，实现"用户修正一次，以后都对"。
 model CategoryCorrection {
   id           String   @id @default(cuid())
   ledgerId     String
+  /// 商户名 SHA256 哈希
   merchantHash String
+  /// 用户手动指定的分类 ID
   categoryId   String
   updatedAt    DateTime @updatedAt
   createdAt    DateTime @default(now())
@@ -283,6 +355,7 @@ model CategoryCorrection {
   @@index([ledgerId])
 }
 
+/// AI 导入记录：文件上传后的处理状态机，含草稿/去重统计/LLM 原始输出
 model AiImport {
   id       String @id @default(cuid())
   ledgerId String
@@ -291,30 +364,41 @@ model AiImport {
   user     User   @relation("UserAiImports", fields: [userId], references: [id], onDelete: Cascade)
 
   // 文件
+  /// 原始文件名
   filename String
-  fileType String // image / pdf / csv / xlsx / text
+  /// 文件类型：image / pdf / csv / xlsx / text
+  fileType String
+  /// 文件大小（字节）
   fileSize Int
 
-  // 用户上传时选定的目标账户（所有解析出的草稿都入到这个账户）
+  /// 用户上传时选定的目标账户（所有解析出的草稿都入到这个账户）
   accountId String
 
-  // AI 模型
+  /// AI 模型名
   modelName String
 
   // 状态
   status   AiImportStatus @default(pending)
-  progress Int            @default(0) // 0-100
-  message  String? // 当前阶段说明或失败原因（简短）
+  /// 进度百分比（0-100）
+  progress Int            @default(0)
+  /// 当前阶段说明或失败原因（简短）
+  message  String?
 
   // 统计
-  parsedCount   Int @default(0) // AI 解析出多少条
-  dupCount      Int @default(0) // 去重跳过多少条
-  insertedCount Int @default(0) // 实际入库多少条
+  /// AI 解析出多少条
+  parsedCount   Int @default(0)
+  /// 去重跳过多少条
+  dupCount      Int @default(0)
+  /// 实际入库多少条
+  insertedCount Int @default(0)
 
   // 草稿 + 调试（明文暂存，apply 完成后清空）
-  draftsJson String? // JSON 数组：[{ type, amount, categoryName, accountName, note, date }]
-  rawOutput  String? // LLM 原始返回，方便排查
-  errorTrace String? // 失败时的错误信息
+  /// 明文草稿 JSON 数组（apply 后清空）
+  draftsJson String?
+  /// LLM 原始返回文本（方便排查）
+  rawOutput  String?
+  /// 失败时的完整错误栈
+  errorTrace String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -323,14 +407,19 @@ model AiImport {
   @@index([ledgerId, status])
 }
 
+/// 预算：按分类设月度/年度预算上限，跟踪执行进度
 model Budget {
   id         String       @id @default(cuid())
   ledgerId   String
   ledger     Ledger       @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 关联分类 ID（null=总预算）
   categoryId String?
   category   Category?    @relation(fields: [categoryId], references: [id])
+  /// 预算金额（上限）
   amount     Decimal      @db.Decimal(15, 2)
+  /// 周期：MONTHLY / YEARLY
   period     BudgetPeriod
+  /// 周期起始日期
   startDate  DateTime
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
@@ -338,9 +427,8 @@ model Budget {
   @@index([ledgerId])
 }
 
-/// 周期账单（房租 / 会员订阅 / 话费 ...）
+/// 周期账单（房租 / 会员订阅 / 话费 …）
 /// 可由 AI 从历史账单识别（isAuto=true）也可手动添加。
-/// note 加密存储，沿用 Bill 的 noteCipher/noteDekVer 字段命名。
 model RecurringBill {
   id         String   @id @default(cuid())
   ledgerId   String
@@ -354,12 +442,13 @@ model RecurringBill {
   /// 备注密文（同 Bill.noteCipher 格式）
   noteCipher Bytes?
   noteDekVer Int?
-  /// monthly | weekly | yearly
+  /// 周期类型：monthly / weekly / yearly
   cycleType  String   @default("monthly")
   /// 几号（月度）或 周几（周度，1-7）或 mmdd（年度）
   cycleDay   Int
-  /// 下次触发时间（服务器算）
+  /// 下次触发生成账单的日期（服务端计算）
   nextDate   DateTime
+  /// 是否启用
   isActive   Boolean  @default(true)
   /// true = AI 自动发现的候选；用户确认后置 false（变成手动维护）
   isAuto     Boolean  @default(false)
@@ -372,47 +461,48 @@ model RecurringBill {
   @@index([nextDate])
 }
 
-/// 储蓄目标（独立模块，不属于 AI）。
-/// name 加密；进度通过查询账单实时算（不冗余存储 currentSaved）
+/// 储蓄目标：设定目标金额和期限，可绑定账户自动计算进度
 model SavingsGoal {
-  id           String    @id @default(cuid())
-  userId       String
-  ledgerId     String
+  id             String    @id @default(cuid())
+  userId         String
+  ledgerId       String
   /// 目标名称密文（SM4-CBC + SM3-HMAC, iv||ct||mac）
-  nameCipher   Bytes
-  nameDekVer   Int       @default(1)
-  targetAmount Decimal   @db.Decimal(15, 2)
+  nameCipher     Bytes
+  nameDekVer     Int       @default(1)
+  /// 目标金额
+  targetAmount   Decimal   @db.Decimal(15, 2)
   /// 起算日：从这天起的（收入-支出）算作已存（未绑定账户时使用）
-  startDate    DateTime  @default(now())
-  /// 绑定的账户：不为空时用账户余额自动计算进度
-  accountId    String?
-  account      Account?  @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  /// 绑定账户时的初始余额快照。为 0 = 计入现有余额；> 0 = 从零开始（只算增量）
-  initialBalance Decimal? @db.Decimal(15, 2)
+  startDate      DateTime  @default(now())
+  /// 绑定的账户 ID：不为空时用账户余额自动计算进度
+  accountId      String?
+  account        Account?  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  /// 绑定账户时的初始余额快照。0 = 计入现有余额；> 0 = 从零开始（只算增量）
+  initialBalance Decimal?  @db.Decimal(15, 2)
   /// 期望达成日（可空）
-  deadline     DateTime?
-  icon         String?
-  color        String?
-  isCompleted  Boolean   @default(false)
-  completedAt  DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  deadline       DateTime?
+  icon           String?
+  color          String?
+  /// 是否已完成
+  isCompleted    Boolean   @default(false)
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@index([userId, ledgerId])
 }
 
-/// AI 洞察的"已忽略"记录。
-/// 洞察本身实时计算，不长期持久化；只持久化"用户对某条洞察的忽略状态"。
-/// 同 (type, target) 30 天内不再出现；过期后如果条件仍成立会再次浮出。
+/// AI 洞察的"已忽略"记录：持久化用户对某条洞察的忽略状态，
+/// 同 (type, target) 在 expireAt 前不再出现
 model AiInsightDismissal {
   id          String   @id @default(cuid())
   userId      String
   ledgerId    String
-  /// anomaly_cat | anomaly_bill | budget_alert | recurring_due | trend_up | trend_down ...
+  /// 洞察类型：anomaly_cat / anomaly_bill / budget_alert / recurring_due / trend_up / trend_down …
   type        String
-  /// 关联对象 id（categoryId / billId / budgetId / recurringId 等），不同 type 含义不同
+  /// 关联对象 ID（categoryId / billId / budgetId / recurringId 等）
   target      String
   dismissedAt DateTime @default(now())
+  /// 忽略到期时间（过期后如果条件仍成立会再次浮出）
   expireAt    DateTime
 
   @@unique([userId, ledgerId, type, target])
@@ -420,19 +510,30 @@ model AiInsightDismissal {
   @@index([expireAt])
 }
 
+/// CFO 建议提案：检测器发现问题后生成的待处理建议，支持审批/忽略/稍后/执行
 model Proposal {
   id             String    @id @default(cuid())
   ledgerId       String
   ledger         Ledger    @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 检测器类型：recategorize_other / large_expense / overspend / idle_to_goal / duplicate
   type           String
-  status         String    @default("pending") // pending|approved|dismissed|snoozed|done|expired
-  severity       String    @default("warning") // info|warning|critical
+  /// 状态：pending / approved / dismissed / snoozed / done / expired
+  status         String    @default("pending")
+  /// 严重级别：info / warning / critical
+  severity       String    @default("warning")
+  /// 提案标题
   title          String
+  /// 提案详细说明
   body           String
+  /// 执行动作类型（如 adjust_budget / recategorize_bill / delete_bill）
   actionKind     String?
+  /// 执行动作参数（JSON）
   actionParams   Json?
+  /// 是否需要客户端参与执行（如 allocate_to_goal）
   requiresClient Boolean   @default(false)
+  /// 证据引用（相关账单/预算的 ID 列表，JSON）
   evidenceRefs   Json?
+  /// 去重键：同 (ledgerId, dedupeKey) 不重复生成
   dedupeKey      String
   createdAt      DateTime  @default(now())
   decidedAt      DateTime?
@@ -441,22 +542,27 @@ model Proposal {
   @@index([ledgerId, status])
 }
 
+/// CFO 学习反馈：某类型建议被忽略≥3 次后自动静音 30 天
 model ProposalFeedback {
   id         String    @id @default(cuid())
   ledgerId   String
+  /// 检测器类型
   type       String
+  /// 被忽略次数
   dismissed  Int       @default(0)
+  /// 被批准次数
   approved   Int       @default(0)
+  /// 静音截止时间（null=未静音）
   mutedUntil DateTime?
   updatedAt  DateTime  @updatedAt
 
   @@unique([ledgerId, type])
 }
 
-/// 每日财经新闻（全局，非账本相关；公开数据，不涉及加密隐私）。
-/// 由 news 模块抓取 RSS 聚合 + 可选 LLM 排序/中文摘要后入库，按 url 去重。
+/// 每日财经新闻：RSS 聚合 + LLM 富化结果，全局共享，按 url 去重
 model NewsArticle {
   id          String   @id @default(cuid())
+  /// 原标题
   title       String
   /// LLM 翻译的中文标题（列表/详情主标题用）；无 LLM 时回退原标题
   titleZh     String?
@@ -464,31 +570,33 @@ model NewsArticle {
   summary     String?
   /// 来源名（CNBC / MarketWatch / 新浪财经 …）
   source      String
-  /// 原文链接，唯一，用于跨日去重
+  /// 原文链接（唯一，跨日去重用）
   url         String   @unique
   imageUrl    String?
-  /// 标签：股市 / 宏观 / 加密 / 科技 / 政策 …（LLM 给）
+  /// 标签：股市 / 宏观 / 加密 / 科技 / 政策 …（LLM 分类）
   category    String?
-  /// 重要性评分 0-100（LLM 给，用于排序）；无 LLM 时按时间
+  /// 重要性评分 0-100（LLM 给，用于排序）
   importance  Int      @default(0)
-  /// 情绪：positive / neutral / negative（可选）
+  /// 情绪：positive / neutral / negative
   sentiment   String?
-  /// 抓取的原文正文（纯文本，懒加载：用户打开详情时才抓）
+  /// 抓取的原文正文（纯文本，懒加载，用户打开详情时才抓）
   content     String?
   /// LLM 基于正文提炼的要点分析（懒加载，打开详情时生成并缓存）
   analysis    String?
+  /// 原文发布时间
   publishedAt DateTime
+  /// 抓取时间
   fetchedAt   DateTime @default(now())
 
   @@index([publishedAt])
   @@index([importance])
 }
 
-/// 用户查询过的股票分析快照（按用户隔离）。每次查询/更新存一条，
-/// 列表按 symbol 取最新一条；分析时参考上一条做对比。公开行情数据，不加密。
+/// 股票 AI 分析快照：用户查询过的股票分析结果，每次查询存一条
 model StockAnalysis {
   id        String   @id @default(cuid())
   userId    String
+  /// 股票代码（如 AAPL / 600176）
   symbol    String
   name      String?
   nameZh    String?
@@ -504,92 +612,126 @@ model StockAnalysis {
   @@index([userId, createdAt])
 }
 
-/// 借贷往来：借出(别人欠我/应收) 或 借入(我欠别人/应付)。本金走转账类账单不计收支。
-/// 对方信息只在备注里（端到端加密），不单独建账户。
+/// 借贷往来：借出(别人欠我/应收) / 借入(我欠别人/应付)
 model Loan {
-  id           String    @id @default(cuid())
+  id           String          @id @default(cuid())
   ledgerId     String
   userId       String
   /// 'lend'=借出(应收) | 'borrow'=借入(应付)
   direction    String
-  amount       Decimal   @db.Decimal(15, 2)
+  /// 本金金额
+  amount       Decimal         @db.Decimal(15, 2)
   /// 已还/已收金额
-  repaidAmount Decimal   @default(0) @db.Decimal(15, 2)
-  /// 出/入款账户（可空）
+  repaidAmount Decimal         @default(0) @db.Decimal(15, 2)
+  /// 出/入款账户 ID（可空）
   accountId    String?
   /// 备注密文（base64，账本 DEK 加密）
   noteCipher   String?
-  noteDekVer   Int       @default(1)
-  /// 凭证图片 key
+  noteDekVer   Int             @default(1)
+  /// 凭证图片 key（uploads 模块）
   voucherKey   String?
+  /// 借贷发生日期
   date         DateTime
   /// 结清时间（已还=本金时置上）
   settledAt    DateTime?
-  createdAt    DateTime  @default(now())
+  createdAt    DateTime        @default(now())
+  /// 还款记录
+  repayments   LoanRepayment[]
 
   @@index([ledgerId, direction, settledAt])
   @@index([ledgerId, createdAt])
 }
 
-/// 用户的股票持仓（每用户每股票一条），用于算总收益/当日收益。
-model StockHolding {
+/// 还款/收款记录：借贷往来的还款流水
+model LoanRepayment {
   id        String   @id @default(cuid())
-  userId    String
-  symbol    String
+  loanId    String
+  loan      Loan     @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  /// 本次还款金额
+  amount    Decimal  @db.Decimal(15, 2)
+  /// 对应账单 ID（如果有）
+  billId    String?
+  date      DateTime
+  createdAt DateTime @default(now())
+
+  @@index([loanId])
+}
+
+/// 用户股票持仓：每用户每股票一条，含成本/数量/关联账户
+model StockHolding {
+  id         String    @id @default(cuid())
+  userId     String
+  /// 股票代码
+  symbol     String
   /// 买入均价
-  buyPrice  Float
+  buyPrice   Float
   /// 持有数量（股）
-  shares    Float
+  shares     Float
   /// 关联账本（建账单/找账户用）。null = 未关联，不自动结算
-  ledgerId  String?
+  ledgerId   String?
   /// 关联账户（投资类）：每日按最新价更新其余额、记当日盈亏流水
-  accountId String?
+  accountId  String?
   /// 上次结算用的价格（算当日 delta 的基准）。null = 尚未建立基准
-  lastPrice Float?
+  lastPrice  Float?
   /// 上次成功结算的时间（幂等/补算判断：同一天只算一次）
   lastCalcAt DateTime?
   /// 每日 AI 持仓决策（JSON: {action, reason}），随每日结算生成
-  advice    String?
-  adviceAt  DateTime?
-  updatedAt DateTime @updatedAt
+  advice     String?
+  adviceAt   DateTime?
+  updatedAt  DateTime  @updatedAt
 
   @@unique([userId, symbol])
 }
 
-/// 每日选股运行记录（一交易日一条）：强势板块 + 市场解读
+/// 每日选股运行记录：一交易日一条，含强势板块 + 市场解读
 model DailyPickRun {
-  id        String   @id @default(cuid())
-  tradeDate String   @unique // yyyy-MM-dd
-  boards    String // JSON: [{name, pct, amount, lead}] 强势板块
-  comment   String? // 市场/板块解读（LLM）
+  id        String      @id @default(cuid())
+  /// 交易日（yyyy-MM-dd）
+  tradeDate String      @unique
+  /// 强势板块 JSON 数组
+  boards    String
+  /// 市场/板块解读（LLM）
+  comment   String?
   picks     DailyPick[]
-  createdAt DateTime @default(now())
+  createdAt DateTime    @default(now())
 }
 
-/// 每日机会股（每交易日 Top N）
+/// 每日机会股：每交易日 Top N 精选，含评分/理由/风险/复盘回测
 model DailyPick {
-  id            String   @id @default(cuid())
-  tradeDate     String // yyyy-MM-dd
+  id            String       @id @default(cuid())
+  /// 交易日（yyyy-MM-dd）
+  tradeDate     String
   runId         String
   run           DailyPickRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  rank          Int // 1..N
-  code          String // 6 位代码
-  symbol        String // 带市场前缀，如 sh600176
+  /// 排名 1..N
+  rank          Int
+  /// 6 位代码
+  code          String
+  /// 带市场前缀代码，如 sh600176
+  symbol        String
+  /// 股票名称
   name          String
-  boardName     String // 所属强势板块
+  /// 所属强势板块名
+  boardName     String
   price         Float?
   changePercent Float?
   pe            Float?
   pb            Float?
-  score         Int // AI 机会评分 0-100
-  action        String // 合规措辞：重点关注/逢低关注/观望 等
-  reason        String // 入选理由
-  risk          String // 主要风险
+  /// AI 机会评分 0-100
+  score         Int
+  /// 合规措辞：重点关注/逢低关注/观望 等
+  action        String
+  /// 入选理由
+  reason        String
+  /// 主要风险
+  risk          String
   // —— 复盘：推荐后用最新价回测的实际表现（学习闭环用）——
-  lastPrice     Float? // 最近一次评估时的价
-  outcomePct    Float? // 自推荐以来累计收益 %
+  /// 最近一次评估时的价格
+  lastPrice     Float?
+  /// 自推荐以来累计收益 %
+  outcomePct    Float?
   outcomeAt     DateTime?
-  createdAt     DateTime @default(now())
+  createdAt     DateTime     @default(now())
 
   @@unique([tradeDate, code])
   @@index([tradeDate, rank])
@@ -598,7 +740,9 @@ model DailyPick {
 /// 选股 agent 的「记忆」：自我进化的策略备忘 + 最近战绩快照（单行，每日更新）
 model PicksMemory {
   id        String   @id @default("default")
-  playbook  String   @default("") // 累积的经验/策略(LLM 每日复盘后更新)
-  stats     String? // JSON: 样本数/胜率/平均收益/分动作命中等
+  /// 累积的经验/策略（LLM 每日复盘后更新）
+  playbook  String   @default("")
+  /// JSON: 样本数/胜率/平均收益/分动作命中等
+  stats     String?
   updatedAt DateTime @updatedAt
 }

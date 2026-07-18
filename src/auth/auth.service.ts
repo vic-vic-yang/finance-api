@@ -23,6 +23,7 @@ export function shapeUser(user: {
   id: string;
   username: string;
   nickname?: string | null;
+  role?: string | null;
   currentLedgerId?: string | null;
 }) {
   const display = (user.nickname ?? '').trim();
@@ -31,6 +32,7 @@ export function shapeUser(user: {
     username: user.username,
     nickname: user.nickname ?? null,
     displayName: display.length > 0 ? display : user.username,
+    role: user.role ?? 'user',
     ...(user.currentLedgerId !== undefined
       ? { currentLedgerId: user.currentLedgerId }
       : {}),
@@ -84,6 +86,7 @@ export class AuthService {
         id: user.id,
         username: user.username,
         nickname: user.nickname,
+        role: user.role,
         currentLedgerId: ledger.id,
       }),
       // 注册即返回 keyBundle，让客户端可立即缓存（避免马上再发一次 login）
@@ -131,6 +134,7 @@ export class AuthService {
         id: user.id,
         username: user.username,
         nickname: user.nickname,
+        role: user.role,
         currentLedgerId,
       }),
       keyBundle: {
@@ -286,6 +290,28 @@ export class AuthService {
         nickname: user.nickname,
         currentLedgerId: user.currentLedgerId,
       }),
+    };
+  }
+
+  async getVipStatus(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true, vipTier: true, vipExpiresAt: true },
+    });
+    if (!user) throw new NotFoundException('用户不存在');
+    const now = new Date();
+    const isVip =
+      user.vipTier !== 'free' &&
+      (!user.vipExpiresAt || user.vipExpiresAt > now);
+    return {
+      role: user.role,
+      vipTier: user.vipTier,
+      vipExpiresAt: user.vipExpiresAt?.toISOString() ?? null,
+      isVip,
+      remainingDays:
+        user.vipExpiresAt && user.vipExpiresAt > now
+          ? Math.ceil((user.vipExpiresAt.getTime() - now.getTime()) / 86400000)
+          : 0,
     };
   }
 }

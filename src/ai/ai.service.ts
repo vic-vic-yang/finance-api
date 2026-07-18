@@ -13,6 +13,7 @@ import { AccountsService } from '../accounts/accounts.service';
 import { LoansService } from '../loans/loans.service';
 import { ApplyImportDto } from './dto/apply-import.dto';
 import { LlmRegistry } from './llm/llm-registry';
+import { ResolvedLlm } from './llm/llm-resolver';
 import {
   ChatMessage,
   ChatModel,
@@ -67,6 +68,12 @@ export function merchantHashOf(merchant?: string | null): string | undefined {
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
+  /** BYOK：导入任务的解析用模型（上传时解析好暂存，_process 异步阶段取用；用完即弃） */
+  private readonly importLlm = new Map<
+    string,
+    { text?: ResolvedLlm | null; vision?: ResolvedLlm | null }
+  >();
+
   private readonly extractors: Extractor[] = [
     new ImageExtractor(),
     new PdfExtractor(),
@@ -127,6 +134,7 @@ export class AiService {
     text: string,
     accountIdHint?: string,
     prevDraft?: { accountId?: string; type?: string; date?: string },
+    llm?: ResolvedLlm,
   ): Promise<{
     draft: {
       type: 'expense' | 'income';
@@ -152,12 +160,12 @@ export class AiService {
       return { draft: null, error: '输入过长（>300 字），建议拆成多条' };
     }
 
-    // 1) 拿默认文本模型
-    const modelName = this.llmRegistry.defaultTextModelName();
+    // 1) 模型：BYOK 三层解析结果优先，缺省回落服务端默认
+    const modelName = llm?.name ?? this.llmRegistry.defaultTextModelName();
     if (!modelName) {
-      return { draft: null, error: '没有可用的 AI 模型（请联系管理员配置）' };
+      return { draft: null, error: '没有可用的 AI 模型（请先在 设置→AI 模型 配置）' };
     }
-    const model = this.llmRegistry.get(modelName);
+    const model = llm?.model ?? this.llmRegistry.get(modelName);
 
     // 2) 准备分类层级 + 默认账户（用于回退）
     const cats = await this.prisma.category.findMany({
@@ -321,6 +329,7 @@ export class AiService {
       byWeek?: { week: string; amount: number }[];
       budgetExec?: { categoryName: string; used: number; limit: number }[];
     },
+    llm?: ResolvedLlm,
   ): Promise<{
     narrative: string;
     highlights: { icon: string; text: string }[];
@@ -362,8 +371,8 @@ export class AiService {
       }
     }
 
-    // 生成层：交给 LLM 写叙事文案
-    const modelName = this.llmRegistry.defaultTextModelName();
+    // 生成层：交给 LLM 写叙事文案（BYOK 解析结果优先）
+    const modelName = llm?.name ?? this.llmRegistry.defaultTextModelName();
     if (!modelName) {
       return {
         narrative: '（未配置 AI 模型，仅显示数据）',
@@ -371,7 +380,7 @@ export class AiService {
         error: 'no_model',
       };
     }
-    const model = this.llmRegistry.get(modelName);
+    const model = llm?.model ?? this.llmRegistry.get(modelName);
 
     // 把聚合压成短文本送给 LLM
     const topCats = [...aggregates.byCategory]
@@ -464,6 +473,7 @@ export class AiService {
     accountId: string,
     file: { originalname: string; size: number; buffer: Buffer; mimetype: string },
     modelName?: string,
+    llm?: { text?: ResolvedLlm | null; vision?: ResolvedLlm | null },
   ) {
     await this.ledgers.ensureMembership(userId, ledgerId);
 
@@ -478,16 +488,20 @@ export class AiService {
     if (!account) throw new BadRequestException('账户不存在或无权使用');
 
     const fileType = detectFileType(file.originalname, file.mimetype);
+    // BYOK：控制器已按三层解析好模型；图片导入必须有视觉模型
     const finalModel =
-      modelName ||
-      (fileType === 'image'
-        ? this.llmRegistry.defaultVisionModelName()
-        : this.llmRegistry.defaultTextModelName());
+      fileType === 'image'
+        ? (llm?.vision?.name ??
+           modelName ??
+           this.llmRegistry.defaultVisionModelName())
+        : (llm?.text?.name ??
+           modelName ??
+           this.llmRegistry.defaultTextModelName());
     if (!finalModel) {
       throw new BadRequestException(
         fileType === 'image'
-          ? '没有可用的视觉模型，请在 .env 配置一个支持图片的模型'
-          : '没有可用的 AI 模型，请在 .env 配置 DEEPSEEK_API_KEY 或 MIMO_API_KEY',
+          ? '当前 AI 配置不含视觉模型，无法解析图片；请在 设置→AI 模型 填写视觉模型，或改用 CSV/Excel/文本'
+          : '尚未配置 AI 模型：请到 我的→设置→AI 模型 填写',
       );
     }
 
@@ -507,9 +521,10 @@ export class AiService {
 
     // fire-and-forget 异步处理；任何异常都被 _process 自己捕获写入 errorTrace
     setImmediate(() => {
+    if (llm) this.importLlm.set(rec.id, llm);
       this._process(rec.id, file.buffer).catch((e) =>
         this.logger.error(`process ${rec.id} crashed: ${e?.stack || e}`),
-      );
+      ).finally(() => this.importLlm.delete(rec.id));
     });
 
     return { import: this.serialize(rec) };
@@ -695,7 +710,11 @@ export class AiService {
         progress: 35,
         message: `AI 解析中…`,
       });
-      const model = this.llmRegistry.get(rec0.modelName);
+      const stash = this.importLlm.get(id);
+      const stashLlm =
+        extracted.kind === 'image' ? stash?.vision : stash?.text;
+      const model =
+        stashLlm?.model ?? this.llmRegistry.get(rec0.modelName);
       if (extracted.kind === 'image' && !model.supportsVision) {
         throw new Error(
           `这是图片，需要支持视觉的 AI 才能识别，当前 AI 不支持。请改用支持图片的方式重传。`,

@@ -80,4 +80,11 @@ export class AuthController {
   recoverFinish(@Body() dto: RecoverFinishDto) {
     return this.authService.recoverFinish(dto);
   }
+
+  // VIP 状态查询
+  @UseGuards(AuthGuard('jwt'))
+  @Get('vip-status')
+  vipStatus(@Req() req: any) {
+    return this.authService.getVipStatus(req.user.id);
+  }
 }

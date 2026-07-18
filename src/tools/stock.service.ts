@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { LlmRegistry } from '../ai/llm/llm-registry';
+import { ResolvedLlm } from '../ai/llm/llm-resolver';
 import { PrismaService } from '../prisma/prisma.service';
 
 const UA =
@@ -124,11 +125,11 @@ export class StockService {
   }
 
   /** 用 LLM 把名字/代码转成 Yahoo ticker（处理中文名等 search 搜不到的情况） */
-  private async llmResolveTicker(q: string): Promise<string | null> {
-    const modelName = this.llms.defaultTextModelName();
+  private async llmResolveTicker(q: string, llm?: ResolvedLlm): Promise<string | null> {
+    const modelName = llm?.name ?? this.llms.defaultTextModelName();
     if (!modelName) return null;
     try {
-      const res = await this.llms.get(modelName).chat(
+      const res = await (llm?.model ?? this.llms.get(modelName)).chat(
         [
           {
             role: 'system',
@@ -150,13 +151,13 @@ export class StockService {
     }
   }
 
-  private async resolve(q: string): Promise<{ symbol: string; name: string; exchange: string }> {
+  private async resolve(q: string, llm?: ResolvedLlm): Promise<{ symbol: string; name: string; exchange: string }> {
     const query = q.trim();
     // 1. 直接 search
     let hit = await this.searchSymbol(query);
     if (hit) return hit;
     // 2. LLM 转 ticker 再 search 校验
-    const guess = await this.llmResolveTicker(query);
+    const guess = await this.llmResolveTicker(query, llm);
     if (guess) {
       hit = await this.searchSymbol(guess);
       if (hit) return hit;
@@ -536,6 +537,7 @@ export class StockService {
   async lookup(
     userId: string,
     q: string,
+    llm?: ResolvedLlm,
   ): Promise<{
     quote: any;
     analysis: any;
@@ -546,7 +548,7 @@ export class StockService {
     if (!q || !q.trim()) {
       throw new NotFoundException('请输入股票名称或代码');
     }
-    const resolved = await this.resolve(q);
+    const resolved = await this.resolve(q, llm);
     const symbol = resolved.symbol.toUpperCase();
 
     // 行情（含公司名）。已聚焦「记账/持仓」，不再做 AI 选股分析与资讯。
@@ -731,7 +733,7 @@ export class StockService {
     { day: string; text: string; at: string }
   >();
 
-  async portfolioInsight(userId: string, force = false) {
+  async portfolioInsight(userId: string, force = false, llm?: ResolvedLlm){
     const day = new Date().toISOString().slice(0, 10);
     const cached = this.insightCache.get(userId);
     if (!force && cached && cached.day === day) {
@@ -745,10 +747,10 @@ export class StockService {
       throw new NotFoundException('还没有持仓，添加后再来看解读');
     }
 
-    const modelName = this.llms.defaultTextModelName();
+    const modelName = llm?.name ?? this.llms.defaultTextModelName();
     if (!modelName) {
       return {
-        text: '尚未配置 AI 模型，无法生成解读。',
+        text: '尚未配置 AI 模型：请到 我的→设置→AI 模型 填写。',
         generatedAt: new Date().toISOString(),
       };
     }
@@ -771,7 +773,7 @@ export class StockService {
       lines.join('\n');
 
     try {
-      const res = await this.llms.get(modelName).chat(
+      const res = await (llm?.model ?? this.llms.get(modelName)).chat(
         [
           {
             role: 'system',

@@ -20,6 +20,7 @@ import { CfoModule } from './cfo/cfo.module';
 import { ToolsModule } from './tools/tools.module';
 import { AppUpdateModule } from './app-update/app-update.module';
 import { LoansModule } from './loans/loans.module';
+import { AdminModule } from './admin/admin.module';
 import { UploadsModule } from './uploads/uploads.module';
 
 @Module({
@@ -48,6 +49,7 @@ import { UploadsModule } from './uploads/uploads.module';
     ToolsModule,
     AppUpdateModule,
     LoansModule,
+    AdminModule,
     UploadsModule,
   ],
   providers: [

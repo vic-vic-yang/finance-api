@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { LlmResolver, headerLlmCfg } from '../ai/llm/llm-resolver';
 import { ExchangeService } from './exchange.service';
 import { StockService } from './stock.service';
 import { StockHoldingService } from './stock-holding.service';
@@ -20,7 +21,22 @@ export class ToolsController {
     private exchange: ExchangeService,
     private stock: StockService,
     private holdings: StockHoldingService,
+    private llmResolver: LlmResolver,
   ) {}
+
+  /** BYOK 三层解析；股票场景 LLM 是增强项，解析失败返回 undefined（功能降级不报错） */
+  private async tryLlm(req: any) {
+    try {
+      return await this.llmResolver.resolveText({
+        userId: req.user?.id,
+        username: req.user?.username,
+        ledgerId: req.user?.currentLedgerId ?? null,
+        header: headerLlmCfg(req),
+      });
+    } catch {
+      return undefined;
+    }
+  }
 
   /** GET /api/tools/exchange-rates?base=CNY */
   @Get('exchange-rates')
@@ -38,8 +54,9 @@ export class ToolsController {
 
   /** GET /api/tools/holdings/insight —— AI 持仓解读（数据解读+风险提示，无操作建议） */
   @Get('holdings/insight')
-  holdingsInsight(@Request() req, @Query('force') force?: string) {
-    return this.stock.portfolioInsight(req.user.id, force === '1');
+  async holdingsInsight(@Request() req, @Query('force') force?: string) {
+    const llm = await this.tryLlm(req);
+    return this.stock.portfolioInsight(req.user.id, force === '1', llm);
   }
 
   /** GET /api/tools/holdings/pnl-daily?days=30 —— 组合每日总盈亏 */
@@ -59,8 +76,9 @@ export class ToolsController {
 
   /** GET /api/tools/stock?q=AAPL —— 查询/更新：取最新数据 + 分析，存快照 */
   @Get('stock')
-  stockLookup(@Request() req, @Query('q') q?: string) {
-    return this.stock.lookup(req.user.id, q ?? '');
+  async stockLookup(@Request() req, @Query('q') q?: string) {
+    const llm = await this.tryLlm(req);
+    return this.stock.lookup(req.user.id, q ?? '', llm);
   }
 
   /**

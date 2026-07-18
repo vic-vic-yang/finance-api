@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { LedgersService } from '../ledgers/ledgers.service';
 import { CfoService } from '../cfo/cfo.service';
 import { LlmRegistry } from './llm/llm-registry';
+import { ResolvedLlm } from './llm/llm-resolver';
 import {
   ChatMessage,
   ChatResponse,
@@ -94,6 +95,7 @@ export class ChatService {
     ledgerId: string,
     userMessage: string,
     history: ChatTurn[] = [],
+    llm?: ResolvedLlm,
   ): Promise<ChatReply> {
     await this.ledgers.ensureMembership(userId, ledgerId);
     const trimmed = (userMessage || '').trim();
@@ -105,15 +107,15 @@ export class ChatService {
       };
     }
 
-    const modelName = this.llmRegistry.defaultTextModelName();
+    const modelName = llm?.name ?? this.llmRegistry.defaultTextModelName();
     if (!modelName) {
       return {
-        reply: '没有可用的 AI 模型（管理员还没配 LLM）',
+        reply: '尚未配置 AI 模型：请到 我的→设置→AI 模型 填写',
         cards: [],
         followupMessages: history,
       };
     }
-    const model = this.llmRegistry.get(modelName);
+    const model = llm?.model ?? this.llmRegistry.get(modelName);
 
     // 控历史长度
     const recentHist = history.slice(-ChatService.MAX_HISTORY_TURNS * 2);

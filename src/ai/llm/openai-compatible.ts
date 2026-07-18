@@ -31,7 +31,8 @@ export class OpenAiCompatibleClient implements ChatModel {
     const body: Record<string, unknown> = {
       model: this.modelId,
       messages,
-      temperature: options.temperature ?? 0.2,
+      // Kimi K3 等模型只允许 temperature=1；确保不低于 1
+      temperature: Math.max(1, options.temperature ?? 0.2),
     };
     if (options.maxTokens) body.max_tokens = options.maxTokens;
     if (options.responseFormat === 'json_object') {
@@ -42,7 +43,13 @@ export class OpenAiCompatibleClient implements ChatModel {
       body.tool_choice = options.toolChoice ?? 'auto';
     }
 
-    const url = `${this.baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
+    // 兼容两种 baseUrl 格式：
+    //   "https://api.deepseek.com"       → /v1/chat/completions
+    //   "https://api.moonshot.cn/v1"     → /chat/completions（已含 /v1）
+    const base = this.baseUrl.replace(/\/+$/, '');
+    const url = base.endsWith('/v1')
+      ? `${base}/chat/completions`
+      : `${base}/v1/chat/completions`;
     const startedAt = Date.now();
 
     // 瞬时网络故障（连接被掐断/超时/429/5xx）自动重试：1s、3s 退避后再试，
