@@ -28,13 +28,29 @@ export class OpenAiCompatibleClient implements ChatModel {
     messages: ChatMessage[],
     options: ChatOptions = {},
   ): Promise<ChatResponse> {
+    // Kimi（Moonshot）新一代模型只允许 temperature=1；其它厂家保持低温求稳，
+    // 账单 JSON 抽取等任务对随机性敏感
+    const kimiOnly = /kimi|moonshot/i.test(this.modelId);
     const body: Record<string, unknown> = {
       model: this.modelId,
       messages,
-      // Kimi K3 等模型只允许 temperature=1；确保不低于 1
-      temperature: Math.max(1, options.temperature ?? 0.2),
+      temperature: kimiOnly
+        ? Math.max(1, options.temperature ?? 1)
+        : (options.temperature ?? 0.2),
     };
     if (options.maxTokens) body.max_tokens = options.maxTokens;
+    // DeepSeek V4 全系默认强制开思考模式（reasoning token 也占 max_tokens），
+    // 官方开关：body.thinking = { type: 'disabled' }。
+    // 本应用调用以结构化抽取/短对话为主，默认关掉思考省 token、降延迟。
+    if (/^deepseek-v/i.test(this.modelId)) {
+      body.thinking = { type: options.thinking ? 'enabled' : 'disabled' };
+    }
+    // Kimi K3 是「永远思考」模型（API 目前只有 reasoning_effort=max，关不掉），
+    // 推理 token 也占 max_tokens 预算：给小了会全耗在思考上，正文一个字都出不来。
+    // 对这类模型把输出预算兜底抬高，让「思考 + 正文」都放得下。
+    if (/kimi-k3/i.test(this.modelId)) {
+      body.max_tokens = Math.max(32768, (body.max_tokens as number) ?? 0);
+    }
     if (options.responseFormat === 'json_object') {
       body.response_format = { type: 'json_object' };
     }
@@ -106,9 +122,15 @@ export class OpenAiCompatibleClient implements ChatModel {
     const finishReason = data?.choices?.[0]?.finish_reason as string | undefined;
 
     // 优先用 content；如果空就回退到 reasoning_content（reasoner 系模型在这里）
+    // 注意 finish=length 时绝不能回退：那种情况是预算全被推理耗光、正文没出来，
+    // 回退会把"思考过程"当答案返回，下游 JSON 解析必炸
     let content: string =
       typeof msg.content === 'string' ? msg.content.trim() : '';
-    if (!content && typeof msg.reasoning_content === 'string') {
+    if (
+      !content &&
+      typeof msg.reasoning_content === 'string' &&
+      finishReason !== 'length'
+    ) {
       content = msg.reasoning_content.trim();
     }
 
@@ -130,9 +152,12 @@ export class OpenAiCompatibleClient implements ChatModel {
         `LLM[${this.name}] empty content. finish=${finishReason}. ` +
           `full response: ${JSON.stringify(data).slice(0, 1500)}`,
       );
+      const hint =
+        finishReason === 'length'
+          ? '输出预算全被消耗（思考型模型会把推理算进 max_tokens），正文没出来。'
+          : '可能原因：触发内容过滤 / 模型不支持 JSON 模式。';
       throw new Error(
-        `LLM[${this.name}] 返回为空 (finish_reason=${finishReason ?? 'unknown'})。` +
-          `可能原因：触发内容过滤 / 模型不支持 JSON 模式 / 输出被截。`,
+        `LLM[${this.name}] 返回为空 (finish_reason=${finishReason ?? 'unknown'})。${hint}`,
       );
     }
 

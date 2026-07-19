@@ -29,7 +29,6 @@ export class ToolsController {
     try {
       return await this.llmResolver.resolveText({
         userId: req.user?.id,
-        username: req.user?.username,
         ledgerId: req.user?.currentLedgerId ?? null,
         header: headerLlmCfg(req),
       });

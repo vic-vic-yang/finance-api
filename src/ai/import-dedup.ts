@@ -38,8 +38,13 @@ export function dedupKey(d: {
 }
 
 /**
- * 去重：有 externalId 用 externalId 精确去重（已存在集合 + 本批内）；
+ * 去重：有 externalId 用「externalId + 金额 + 方向」精确去重（已存在集合 + 本批内）；
  * 无 externalId 退回 日期(ms)+金额(Number归一) 近似去重。
+ *
+ * 注意三点都必须命中才算同一笔：
+ * - 金额：LLM 从密集 PDF 抽订单号时可能对错行，把 A 的订单号贴到 B 上；
+ * - 方向：付款与退款常共用同一订单号且金额相同（如 快捷支付 -67.90 / 快捷退款 +67.90），
+ *   方向相反是两笔交易，漏掉方向会把退款误杀。
  */
 export function dedupDrafts<T extends DedupInput>(
   drafts: T[],
@@ -52,8 +57,9 @@ export function dedupDrafts<T extends DedupInput>(
   let skipped = 0;
   for (const d of drafts) {
     if (d.externalId) {
-      if (seenExt.has(d.externalId)) { skipped++; continue; }
-      seenExt.add(d.externalId);
+      const key = extKey(d.externalId, d.amount, d.type);
+      if (seenExt.has(key)) { skipped++; continue; }
+      seenExt.add(key);
       kept.push(d);
     } else {
       const key = dedupKey(d);
@@ -63,4 +69,9 @@ export function dedupDrafts<T extends DedupInput>(
     }
   }
   return { kept, skipped };
+}
+
+/** externalId 去重键：订单号|金额|方向（构造 existing 集合时也必须用这个） */
+export function extKey(externalId: string, amount: number, type?: string): string {
+  return `${externalId}|${Number(amount)}|${type ?? ''}`;
 }

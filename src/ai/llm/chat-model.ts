@@ -57,6 +57,11 @@ export interface ChatOptions {
   tools?: ToolSpec[];
   /** 'auto'(默认) / 'none' / 强制某个工具 */
   toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+  /**
+   * 思考模式开关（目前仅对 DeepSeek V4 系生效，默认关闭）。
+   * true = 显式开启；省略 / false = 关闭（省 token、降延迟）
+   */
+  thinking?: boolean;
 }
 
 export interface ChatResponse {

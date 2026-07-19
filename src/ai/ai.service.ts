@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
@@ -30,8 +31,8 @@ import { PdfExtractor } from './extractors/pdf.extractor';
 import { CsvExtractor } from './extractors/csv.extractor';
 import { XlsxExtractor } from './extractors/xlsx.extractor';
 import { TextExtractor } from './extractors/text.extractor';
-import { normalizeDirection, dedupDrafts, dedupKey } from './import-dedup';
-import { isGatewayPayment, filterGatewayDups } from './gateway-dedup';
+import { normalizeDirection, dedupDrafts, dedupKey, extKey } from './import-dedup';
+import { isGatewayPayment, isBankFundedHint, filterGatewayDups, filterCrossDups } from './gateway-dedup';
 
 /** AI 返回的单条草稿（明文，等客户端加密入库）。
  *  categoryId / accountId 在 _process 阶段就解析好，
@@ -66,7 +67,7 @@ export function merchantHashOf(merchant?: string | null): string | undefined {
 }
 
 @Injectable()
-export class AiService {
+export class AiService implements OnModuleInit {
   private readonly logger = new Logger(AiService.name);
   /** BYOK：导入任务的解析用模型（上传时解析好暂存，_process 异步阶段取用；用完即弃） */
   private readonly importLlm = new Map<
@@ -89,6 +90,31 @@ export class AiService {
     private readonly accounts: AccountsService,
     private readonly loans: LoansService,
   ) {}
+
+  /**
+   * 启动自愈：解析是 fire-and-forget 的内存任务，进程重启（含 watch 模式热重启）
+   * 会杀死在途解析，状态机永远卡住。启动时把这些「孤儿」标记为失败，提示重传。
+   * review_ready 不动——草稿在库里，客户端随时可以续传入库。
+   */
+  async onModuleInit() {
+    try {
+      const stuck = await this.prisma.aiImport.updateMany({
+        where: {
+          status: { in: ['pending', 'extracting', 'parsing', 'dedupping', 'applying'] },
+        },
+        data: {
+          status: 'failed',
+          message: '服务重启导致解析中断，请删除后重新上传',
+          errorTrace: 'interrupted by server restart',
+        },
+      });
+      if (stuck.count > 0) {
+        this.logger.warn(`清理 ${stuck.count} 条因服务重启中断的导入记录`);
+      }
+    } catch (e: any) {
+      this.logger.warn(`导入记录启动自愈失败（忽略）: ${e?.message}`);
+    }
+  }
 
   // ── 列表 / 详情 / 删除 ──────────────────────────────────────
 
@@ -806,12 +832,15 @@ export class AiService {
       });
       const dedupResult = await this._dedup(rec0.ledgerId, resolved, rec0);
 
-      // 银行网关跨源去重：仅对"非聚合器自身"的导入跑（聚合器自己的流水不该被网关去重）
+      // 跨源去重（双向）：
+      // - 银行流水导入 → 网关行(财付通/支付宝) 对账已入库的聚合器账单
+      // - 聚合器(微信/支付宝)导入 → "绑银行卡支付"的草稿 对账已入库的银行/手动账单
+      //   （微信订单号与银行订单号不同，externalId 去重拦不住这种重复）
       const isAggregatorImport = /支付宝|alipay|微信|wechat|weixin/i.test(
         rec0.filename ?? '',
       );
       const gw = isAggregatorImport
-        ? { kept: dedupResult.kept, skipped: 0 }
+        ? await this._aggregatorCrossDedup(rec0.ledgerId, dedupResult.kept)
         : await this._gatewayDedup(rec0.ledgerId, dedupResult.kept);
       const kept = gw.kept;
       const totalSkipped = dedupResult.skipped + gw.skipped;
@@ -852,8 +881,10 @@ export class AiService {
     }
   }
 
-  /** 单段文本超过此值就分块（每块约 80-120 条流水，LLM 输出压力小） */
-  private static readonly CHUNK_CHARS = 20_000;
+  /** 单段文本超过此值就分块（每块约 30-50 条流水）。
+   *  注意输出 JSON 体积约为输入原文的 1.5-2 倍（字段名/分类/格式化开销），
+   *  块太大会顶爆 max_tokens（16384）导致 finish=length 截断 */
+  private static readonly CHUNK_CHARS = 8_000;
   /** 分块时相邻两块重叠的行数（防止一笔流水被拦腰截断） */
   private static readonly CHUNK_OVERLAP_LINES = 4;
 
@@ -1015,8 +1046,9 @@ export class AiService {
         '工资/奖金/报销 → 收入>工资 或 收入>报销',
         '理发/美甲/健身房 → 生活>美容美发 或 生活>健身',
         '手机充值/宽带缴费 → 通讯>话费 或 通讯>网费',
-        '淘宝/京东/拼多多 → 购物>网购',
+               '淘宝/京东/拼多多 → 购物>网购',
         '转账/红包/零钱通 → 转账>转入 或 转账>转出',
+        '信用卡还款/花呗还款/白条还款 → 转账>还款（direction 必须 transfer）',
         '',
         '【输出格式】',
         '{"bills":[{"type":"expense"|"income","direction":"expense"|"income"|"transfer","amount":正数,"categoryName":"一级>二级或一级","note":"商户·商品·摘要（·分隔）","date":"ISO8601","orderId":"交易订单号原样","paymentMethod":"收/付款方式原样","counterparty":"交易对方原样","balance":联机余额数值或null}]}',
@@ -1027,6 +1059,8 @@ export class AiService {
         '- 注意识别退款（商户名含"退款"且金额与消费相反的通常是退款，归入原分类）',
         '- note 写商户名/商品/备注，不要写日期或金额',
         '- direction：账单的"收/支"列若是"不计收支"(还款/充值/提现/转账)填 transfer；否则按收入/支出填',
+        '- 还款类交易（摘要/对方含 还款/信贷/待还款，如 信用卡还款、花呗、白条、网贷）无论有没有"不计收支"列，direction 一律填 transfer，categoryName 用"转账>还款"；还款**不是**借贷，严禁用"借贷>借钱"分类',
+        '- 摘要为"转账汇款/行内转账/汇入汇款/跨行转出/银联代付/网上转账"等字样的资金划转，direction 一律填 transfer，categoryName 用"转账>转出"或"转账>转入"；counterparty 把对方姓名和卡号原样抄全（识别"转到自己另一个账户"要用）',
         '- orderId/paymentMethod/counterparty：账单里有就原样照抄，没有就空串；忽略对账单顶部的汇总抬头行',
         '- balance：银行流水若有"联机余额/余额/Balance"列，填该笔交易后的余额数值；没有该列就填 null',
       ].join('\n'),
@@ -1040,7 +1074,10 @@ export class AiService {
     const res = await model.chat([sys, userMsg], {
       responseFormat: 'json_object',
       temperature: 0.1,
-      maxTokens: 32768,
+      // 必须显式给输出上限：各家缺省值差异大（DeepSeek 4096+，Moonshot 很小），
+      // 不传时长流水 JSON 会被 finish=length 截断。
+      // 一块约 80-120 条流水，JSON 可能上万 token，给 16k 留足余量
+      maxTokens: 16384,
     });
 
     const raw = res.content;
@@ -1145,8 +1182,12 @@ export class AiService {
         externalId: true,
       },
     });
+    // externalId 去重键：订单号+金额+方向三者一致才算重复
+    // （防 LLM 贴错订单号误杀；付款/退款同单同额方向相反是两笔）
     const existExt = new Set(
-      existing.map((b) => b.externalId).filter(Boolean) as string[],
+      existing
+        .filter((b) => b.externalId)
+        .map((b) => extKey(b.externalId!, Number(b.amount), b.type)),
     );
     const existDak = new Set(
       existing.map((b) =>
@@ -1184,7 +1225,7 @@ export class AiService {
         const pendingDrafts = JSON.parse(pi.draftsJson!) as AiDraft[];
         for (const pd of pendingDrafts) {
           if (pd.externalId) {
-            existExt.add(pd.externalId);
+            existExt.add(extKey(pd.externalId, pd.amount, pd.type));
           } else {
             existDak.add(dedupKey(pd));
           }
@@ -1225,6 +1266,37 @@ export class AiService {
       select: { amount: true, date: true },
     });
     return filterGatewayDups(drafts, existingAgg, WINDOW_DAYS);
+  }
+
+  /**
+   * 跨源去重（反向）：聚合器(微信/支付宝)导入里"绑银行卡支付"的草稿，
+   * 对账"已入库的非聚合器账单"（银行流水导入 / 手动记账）。
+   * 典型：微信账单里"招商银行储蓄卡(5476)"付的款，银行流水里也有这笔——
+   * 微信订单号与银行订单号不同，externalId 去重拦不住，按 方向+金额+±4天 模糊去重。
+   * direction=transfer 的草稿（还款/转账）不参与：它们承载账户间语义，宁可保留。
+   */
+  private async _aggregatorCrossDedup(
+    ledgerId: string,
+    drafts: AiDraft[],
+  ): Promise<{ kept: AiDraft[]; skipped: number }> {
+    const isCandidate = (d: AiDraft) =>
+      d.direction !== 'transfer' && isBankFundedHint(d.fundingHint);
+    if (!drafts.some(isCandidate)) return { kept: drafts, skipped: 0 };
+    const candidates = drafts.filter(isCandidate);
+    const WINDOW_DAYS = 4;
+    const times = candidates.map((d) => new Date(d.date).getTime());
+    const minT = Math.min(...times) - WINDOW_DAYS * 86400000;
+    const maxT = Math.max(...times) + WINDOW_DAYS * 86400000;
+    const existing = await this.prisma.bill.findMany({
+      where: {
+        ledgerId,
+        source: { notIn: ['alipay', 'wechat'] },
+        date: { gte: new Date(minT), lte: new Date(maxT) },
+        amount: { in: candidates.map((d) => new Prisma.Decimal(d.amount)) },
+      },
+      select: { amount: true, date: true, type: true },
+    });
+    return filterCrossDups(drafts, existing, WINDOW_DAYS, isCandidate);
   }
 
   /**

@@ -114,7 +114,13 @@ export class BillsService {
       where: { id, ledgerId }, include: BILL_INCLUDE,
     });
     if (!bill) throw new NotFoundException('账单不存在');
-    return { bill: this.serialize(bill) };
+    const out: any = { bill: this.serialize(bill) };
+    // 转账账单：带上配对腿的账户 id（编辑转账表单需要预填对端）
+    if (bill.isTransfer) {
+      const pair = await this._findTransferPair(this.prisma, bill);
+      out.bill.transferPairAccountId = pair?.accountId ?? null;
+    }
+    return out;
   }
 
   async create(ledgerId: string, userId: string, dto: CreateBillDto) {
@@ -173,6 +179,32 @@ export class BillsService {
       const existing = await tx.bill.findFirst({ where: { id, ledgerId } });
       if (!existing) throw new NotFoundException('账单不存在');
 
+      // 转账/借贷类账单（isTransfer）：整条转账（双腿）可编辑——金额/账户/日期
+      // 都允许改，但必须找到配对腿同步 + 余额按"冲正旧账 → 记新账"重算；
+      // 类型切换（转账→收支）会孤儿化另一条腿，拒绝。
+      let transferPair: { id: string; accountId: string } | null = null;
+      if (existing.isTransfer) {
+        const typeChanged = dto.type !== undefined && dto.type !== existing.type;
+        if (typeChanged) {
+          throw new BadRequestException(
+            '转账账单不可改为收支类型；如需变更请删除后重新记账',
+          );
+        }
+        const amountChanged =
+          dto.amount !== undefined && dto.amount !== Number(existing.amount);
+        const accountChanged =
+          (dto.accountId !== undefined && dto.accountId !== existing.accountId) ||
+          dto.toAccountId !== undefined;
+        if (amountChanged || accountChanged || dto.date) {
+          transferPair = await this._findTransferPair(tx, existing);
+          if ((amountChanged || accountChanged) && !transferPair) {
+            throw new BadRequestException(
+              '未找到配对的转账腿，金额/账户不可修改；如需变更请删除后重新转账',
+            );
+          }
+        }
+      }
+
       if (dto.accountId && dto.accountId !== existing.accountId) {
         const newAcc = await tx.account.findFirst({
           where: {
@@ -183,18 +215,31 @@ export class BillsService {
         });
         if (!newAcc) throw new NotFoundException('账户不存在或无权使用');
       }
+      // 转账编辑：配对腿新账户需存在于本账本（与新建转账的"转入账户"同规则，不限本人）
+      if (existing.isTransfer && transferPair && dto.toAccountId) {
+        if (dto.toAccountId === (dto.accountId ?? existing.accountId)) {
+          throw new BadRequestException('转出和转入账户不能相同');
+        }
+        const pairAcc = await tx.account.findFirst({
+          where: { id: dto.toAccountId, ledgerId },
+        });
+        if (!pairAcc) throw new NotFoundException('对端账户不存在');
+      }
 
       const oldAmount = Number(existing.amount);
-      if (existing.type === 'income') {
-        await tx.account.update({
-          where: { id: existing.accountId },
-          data: { balance: { decrement: oldAmount } },
-        });
-      } else {
-        await tx.account.update({
-          where: { id: existing.accountId },
-          data: { balance: { increment: oldAmount } },
-        });
+      // 转账腿的余额调整走下面的"配对同步"逻辑，这里不冲正
+      if (!existing.isTransfer) {
+        if (existing.type === 'income') {
+          await tx.account.update({
+            where: { id: existing.accountId },
+            data: { balance: { decrement: oldAmount } },
+          });
+        } else {
+          await tx.account.update({
+            where: { id: existing.accountId },
+            data: { balance: { increment: oldAmount } },
+          });
+        }
       }
 
       const newType = dto.type || existing.type;
@@ -219,15 +264,59 @@ export class BillsService {
         include: BILL_INCLUDE,
       });
 
-      if (newType === 'income') {
+      if (!existing.isTransfer) {
+        if (newType === 'income') {
+          await tx.account.update({
+            where: { id: newAccountId },
+            data: { balance: { increment: newAmount } },
+          });
+        } else {
+          await tx.account.update({
+            where: { id: newAccountId },
+            data: { balance: { decrement: newAmount } },
+          });
+        }
+      }
+
+      // 转账编辑：冲正旧双腿余额 → 按新账户/新金额重记，配对腿同步更新
+      if (existing.isTransfer && transferPair) {
+        const editedIsOut = existing.type === 'expense';
+        // 旧账的转出/转入账户
+        const oldOutId = editedIsOut ? existing.accountId : transferPair.accountId;
+        const oldInId = editedIsOut ? transferPair.accountId : existing.accountId;
+        // 新账：被编辑腿用 dto.accountId，配对腿用 dto.toAccountId
+        const newEditedAccId = dto.accountId ?? existing.accountId;
+        const newPairAccId = dto.toAccountId ?? transferPair.accountId;
+        const newOutId = editedIsOut ? newEditedAccId : newPairAccId;
+        const newInId = editedIsOut ? newPairAccId : newEditedAccId;
+
+        // 冲正旧账（转出方回补、转入方回吐）
         await tx.account.update({
-          where: { id: newAccountId },
+          where: { id: oldOutId },
+          data: { balance: { increment: oldAmount } },
+        });
+        await tx.account.update({
+          where: { id: oldInId },
+          data: { balance: { decrement: oldAmount } },
+        });
+        // 记新账
+        await tx.account.update({
+          where: { id: newOutId },
+          data: { balance: { decrement: newAmount } },
+        });
+        await tx.account.update({
+          where: { id: newInId },
           data: { balance: { increment: newAmount } },
         });
-      } else {
-        await tx.account.update({
-          where: { id: newAccountId },
-          data: { balance: { decrement: newAmount } },
+
+        // 配对腿同步（金额 / 账户 / 日期）
+        await tx.bill.update({
+          where: { id: transferPair.id },
+          data: {
+            amount: new Prisma.Decimal(newAmount),
+            accountId: newPairAccId,
+            ...(dto.date && { date: new Date(dto.date) }),
+          },
         });
       }
 
@@ -256,6 +345,48 @@ export class BillsService {
 
       return { message: '更新成功', bill: this.serialize(bill) };
     });
+  }
+
+  /**
+   * 找转账腿的配对腿：同账本、isTransfer、方向相反、同金额、不同账户。
+   * 多条候选时（同日多笔同额转账）按"交易日期完全相同优先 → 创建时间最接近"取一条。
+   */
+  private async _findTransferPair(
+    tx: any,
+    bill: {
+      id: string;
+      ledgerId: string;
+      accountId: string;
+      type: string;
+      amount: any;
+      date: Date;
+      createdAt: Date;
+    },
+  ): Promise<{ id: string; accountId: string } | null> {
+    const candidates = await tx.bill.findMany({
+      where: {
+        ledgerId: bill.ledgerId,
+        isTransfer: true,
+        id: { not: bill.id },
+        type: bill.type === 'expense' ? 'income' : 'expense',
+        amount: new Prisma.Decimal(Number(bill.amount)),
+        accountId: { not: bill.accountId },
+      },
+      select: { id: true, accountId: true, date: true, createdAt: true },
+    });
+    if (candidates.length === 0) return null;
+    const t = bill.date.getTime();
+    const createdMs = bill.createdAt.getTime();
+    candidates.sort((a: any, b: any) => {
+      const da = a.date.getTime() === t ? 0 : 1;
+      const db = b.date.getTime() === t ? 0 : 1;
+      if (da !== db) return da - db;
+      return (
+        Math.abs(a.createdAt.getTime() - createdMs) -
+        Math.abs(b.createdAt.getTime() - createdMs)
+      );
+    });
+    return { id: candidates[0].id, accountId: candidates[0].accountId };
   }
 
   /**

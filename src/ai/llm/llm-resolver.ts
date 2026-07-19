@@ -1,7 +1,13 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { LedgersService } from '../../ledgers/ledgers.service';
 import { ChatModel } from './chat-model';
 import { OpenAiCompatibleClient } from './openai-compatible';
 import { LlmRegistry } from './llm-registry';
@@ -17,7 +23,7 @@ export interface HeaderLlmCfg {
 export interface ResolvedLlm {
   name: string;
   model: ChatModel;
-  /** personal=用户手机自带 / ledger=账本共享 / server=服务端默认(白名单) */
+  /** personal=用户手机自带 / ledger=账本共享 / server=服务端默认(VIP) */
   source: 'personal' | 'ledger' | 'server';
 }
 
@@ -36,18 +42,30 @@ export function headerLlmCfg(req: any): HeaderLlmCfg | null {
  * LLM 三层解析（BYOK）：
  *   ① 请求头个人配置（永远最优先）
  *   ② 当前账本的共享配置（LedgerLlmConfig，Key 加密落库）
- *   ③ 服务端 .env 默认（LLM_DEFAULT_ALLOWED_USERS 白名单；未设置该变量=全放行）
+ *   ③ 服务端 .env 默认（仅 VIP 用户可用）
  *   ④ 都没有 → 抛「请先配置 AI 模型」
  */
 @Injectable()
-export class LlmResolver {
+export class LlmResolver implements OnModuleInit {
   private readonly logger = new Logger(LlmResolver.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly registry: LlmRegistry,
+    private readonly ledgers: LedgersService,
   ) {}
+
+  onModuleInit() {
+    if (
+      !this.config.get<string>('LLM_CONFIG_SECRET') &&
+      !this.config.get<string>('JWT_SECRET')
+    ) {
+      this.logger.warn(
+        '⚠️ LLM_CONFIG_SECRET / JWT_SECRET 均未配置，账本共享 LLM Key 将用内置兜底密钥加密——生产环境必须配置！',
+      );
+    }
+  }
 
   // ── Key 加密（AES-256-GCM，密钥来自 LLM_CONFIG_SECRET，缺省回落 JWT_SECRET）──
 
@@ -77,30 +95,7 @@ export class LlmResolver {
     return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
   }
 
-  // ── 白名单 ────────────────────────────────────────────────
-
-  /** 未配置 LLM_DEFAULT_ALLOWED_USERS 时全放行（平滑上线）；配置后仅名单内可用服务端默认 */
-  serverDefaultAllowed(username?: string | null): boolean {
-    const raw = this._allowedListRaw();
-    if (!raw) return true;
-    if (!username) return false;
-    return this._isInList(username, raw);
-  }
-
-  /** 读取 LLM_DEFAULT_ALLOWED_USERS 原始值（空 = 未配置） */
-  private _allowedListRaw(): string | null {
-    const raw = (this.config.get<string>('LLM_DEFAULT_ALLOWED_USERS') || '').trim();
-    return raw || null;
-  }
-
-  /** 用户名是否在逗号分隔的白名单中 */
-  private _isInList(username: string, raw: string): boolean {
-    return raw
-      .split(',')
-      .map((x) => x.trim().toLowerCase())
-      .filter(Boolean)
-      .includes(username.toLowerCase());
-  }
+  // ── VIP ─────────────────────────────────────────────────
 
   /**
    * 检查用户是否为 VIP（只看 vipTier，不关心 role）。
@@ -124,7 +119,6 @@ export class LlmResolver {
 
   async resolveText(opts: {
     userId?: string | null;
-    username?: string | null;
     ledgerId?: string | null;
     header?: HeaderLlmCfg | null;
   }): Promise<ResolvedLlm> {
@@ -159,30 +153,21 @@ export class LlmResolver {
         }
       }
     }
-    // ③ 服务端默认（VIP / 白名单 / admin 可用）
-    if (this.serverDefaultAllowed(opts.username)) {
+    // ③ 服务端默认（仅 VIP）
+    if (await this._isVip(opts.userId)) {
       const name = this.registry.defaultTextModelName();
       if (name) {
-        // 白名单内用户直接放行；其余需 VIP
-        const listRaw = this._allowedListRaw();
-        const inWhitelist = listRaw && opts.username && this._isInList(opts.username, listRaw);
-        if (!inWhitelist && !(await this._isVip(opts.userId))) {
-          throw new ForbiddenException(
-            '服务端 AI 模型是 VIP 会员专属功能。请开通 VIP 或到「设置→AI 模型」配置你自己的模型',
-          );
-        }
         return { name, source: 'server', model: this.registry.get(name) };
       }
     }
     throw new ForbiddenException(
-      '尚未配置 AI 模型：请到「我的→设置→AI 模型」填写你的模型和 Key，或联系管理员开通 VIP',
+      '尚未配置 AI 模型：请到「我的→设置→AI 模型」填写你的模型和 Key，或开通 VIP 使用服务端内置模型',
     );
   }
 
   /** 视觉模型解析（图片导入用）；返回 null 表示当前配置不支持视觉 */
   async resolveVision(opts: {
     userId?: string | null;
-    username?: string | null;
     ledgerId?: string | null;
     header?: HeaderLlmCfg | null;
   }): Promise<ResolvedLlm | null> {
@@ -215,22 +200,109 @@ export class LlmResolver {
         } catch { /* 解密失败按无视觉处理 */ }
       }
     }
-    if (this.serverDefaultAllowed(opts.username)) {
+    // 服务端默认视觉模型（仅 VIP）
+    if (await this._isVip(opts.userId)) {
       const name = this.registry.defaultVisionModelName();
       if (name) {
-        const listRaw = this._allowedListRaw();
-        const inWhitelist = listRaw && opts.username && this._isInList(opts.username, listRaw);
-        if (!inWhitelist && !(await this._isVip(opts.userId))) {
-          return null; // 非 VIP 不提供视觉模型
-        }
         return { name, source: 'server', model: this.registry.get(name) };
       }
     }
     return null;
   }
-}
 
-// ── 账本共享配置 CRUD（配置页用） ─────────────────────────────
+  // ── 账本共享配置 CRUD（配置页用；一律先校验账本成员身份） ────────
+
+  /** 当前账本的共享配置视图（不含 Key）+ 是否 VIP（可用服务端默认） */
+  async getConfigView(
+    ledgerId: string,
+    userId: string,
+  ): Promise<{ shared: LedgerLlmView | null; serverDefaultAllowed: boolean }> {
+    await this.ledgers.ensureMembership(userId, ledgerId);
+    const cfg = await this.prisma.ledgerLlmConfig.findUnique({
+      where: { ledgerId },
+    });
+    let shared: LedgerLlmView | null = null;
+    if (cfg) {
+      const owner = await this.prisma.user.findUnique({
+        where: { id: cfg.ownerUserId },
+        select: { username: true, nickname: true },
+      });
+      shared = {
+        provider: cfg.provider,
+        baseUrl: cfg.baseUrl,
+        modelId: cfg.modelId,
+        visionModelId: cfg.visionModelId,
+        ownerUserId: cfg.ownerUserId,
+        ownerName: owner?.nickname || owner?.username || '成员',
+        isOwner: cfg.ownerUserId === userId,
+      };
+    }
+    return { shared, serverDefaultAllowed: await this._isVip(userId) };
+  }
+
+  /** 保存/更新账本共享配置（Key 加密落库；仅配置者可改） */
+  async upsertLedgerConfig(
+    ledgerId: string,
+    userId: string,
+    dto: {
+      provider?: string;
+      baseUrl: string;
+      modelId: string;
+      visionModelId?: string | null;
+      apiKey?: string;
+    },
+  ): Promise<{ message: string }> {
+    await this.ledgers.ensureMembership(userId, ledgerId);
+    const existing = await this.prisma.ledgerLlmConfig.findUnique({
+      where: { ledgerId },
+    });
+    if (existing && existing.ownerUserId !== userId) {
+      throw new ForbiddenException('该账本的共享模型由其他成员配置，只有配置者本人可以修改');
+    }
+    const key = (dto.apiKey ?? '').trim();
+    if (!existing && !key) {
+      throw new ForbiddenException('请填写 API Key');
+    }
+    const apiKeyEnc = key ? this.encryptKey(key) : existing!.apiKeyEnc;
+    await this.prisma.ledgerLlmConfig.upsert({
+      where: { ledgerId },
+      create: {
+        ledgerId,
+        ownerUserId: userId,
+        provider: dto.provider ?? 'custom',
+        baseUrl: dto.baseUrl,
+        modelId: dto.modelId,
+        visionModelId: dto.visionModelId ?? null,
+        apiKeyEnc,
+      },
+      update: {
+        provider: dto.provider ?? 'custom',
+        baseUrl: dto.baseUrl,
+        modelId: dto.modelId,
+        visionModelId: dto.visionModelId ?? null,
+        apiKeyEnc,
+      },
+    });
+    return { message: '已共享给账本成员' };
+  }
+
+  /** 关闭共享并删除服务器上的 Key（仅配置者） */
+  async deleteLedgerConfig(
+    ledgerId: string,
+    userId: string,
+  ): Promise<{ message: string }> {
+    await this.ledgers.ensureMembership(userId, ledgerId);
+    const existing = await this.prisma.ledgerLlmConfig.findUnique({
+      where: { ledgerId },
+    });
+    if (!existing) return { message: '已关闭共享' };
+    if (existing.ownerUserId !== userId) {
+      throw new ForbiddenException('只有配置者本人可以关闭共享');
+    }
+    await this.prisma.ledgerLlmConfig.delete({ where: { ledgerId } });
+    return { message: '已关闭共享并删除服务器上的 Key' };
+  }
+}
 
 export interface LedgerLlmView {
   provider: string;
@@ -241,88 +313,3 @@ export interface LedgerLlmView {
   ownerName: string;
   isOwner: boolean;
 }
-
-declare module './llm-resolver' {
-  interface LlmResolver {
-    getConfigView(ledgerId: string, userId: string, username?: string | null):
-      Promise<{ shared: LedgerLlmView | null; serverDefaultAllowed: boolean }>;
-    upsertLedgerConfig(ledgerId: string, userId: string, dto: {
-      provider?: string; baseUrl: string; modelId: string;
-      visionModelId?: string | null; apiKey?: string;
-    }): Promise<{ message: string }>;
-    deleteLedgerConfig(ledgerId: string, userId: string): Promise<{ message: string }>;
-  }
-}
-
-LlmResolver.prototype.getConfigView = async function (
-  this: LlmResolver, ledgerId: string, userId: string, username?: string | null,
-) {
-  const self = this as any;
-  const cfg = await self.prisma.ledgerLlmConfig.findUnique({ where: { ledgerId } });
-  let shared: LedgerLlmView | null = null;
-  if (cfg) {
-    const owner = await self.prisma.user.findUnique({
-      where: { id: cfg.ownerUserId },
-      select: { username: true, nickname: true },
-    });
-    shared = {
-      provider: cfg.provider,
-      baseUrl: cfg.baseUrl,
-      modelId: cfg.modelId,
-      visionModelId: cfg.visionModelId,
-      ownerUserId: cfg.ownerUserId,
-      ownerName: (owner?.nickname || owner?.username || '成员') as string,
-      isOwner: cfg.ownerUserId === userId,
-    };
-  }
-  return { shared, serverDefaultAllowed: this.serverDefaultAllowed(username) };
-};
-
-LlmResolver.prototype.upsertLedgerConfig = async function (
-  this: LlmResolver, ledgerId: string, userId: string,
-  dto: { provider?: string; baseUrl: string; modelId: string; visionModelId?: string | null; apiKey?: string },
-) {
-  const self = this as any;
-  const existing = await self.prisma.ledgerLlmConfig.findUnique({ where: { ledgerId } });
-  if (existing && existing.ownerUserId !== userId) {
-    throw new ForbiddenException('该账本的共享模型由其他成员配置，只有配置者本人可以修改');
-  }
-  const key = (dto.apiKey ?? '').trim();
-  if (!existing && !key) {
-    throw new ForbiddenException('请填写 API Key');
-  }
-  const apiKeyEnc = key ? this.encryptKey(key) : existing!.apiKeyEnc;
-  await self.prisma.ledgerLlmConfig.upsert({
-    where: { ledgerId },
-    create: {
-      ledgerId,
-      ownerUserId: userId,
-      provider: dto.provider ?? 'custom',
-      baseUrl: dto.baseUrl,
-      modelId: dto.modelId,
-      visionModelId: dto.visionModelId ?? null,
-      apiKeyEnc,
-    },
-    update: {
-      provider: dto.provider ?? 'custom',
-      baseUrl: dto.baseUrl,
-      modelId: dto.modelId,
-      visionModelId: dto.visionModelId ?? null,
-      apiKeyEnc,
-    },
-  });
-  return { message: '已共享给账本成员' };
-};
-
-LlmResolver.prototype.deleteLedgerConfig = async function (
-  this: LlmResolver, ledgerId: string, userId: string,
-) {
-  const self = this as any;
-  const existing = await self.prisma.ledgerLlmConfig.findUnique({ where: { ledgerId } });
-  if (!existing) return { message: '已关闭共享' };
-  if (existing.ownerUserId !== userId) {
-    throw new ForbiddenException('只有配置者本人可以关闭共享');
-  }
-  await self.prisma.ledgerLlmConfig.delete({ where: { ledgerId } });
-  return { message: '已关闭共享并删除服务器上的 Key' };
-};

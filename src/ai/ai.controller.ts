@@ -33,11 +33,10 @@ export class AiController {
     private readonly llmResolver: LlmResolver,
   ) {}
 
-  /** 三层解析当前请求可用的文本模型（①请求头 ②账本共享 ③服务端白名单） */
+  /** 三层解析当前请求可用的文本模型（①请求头 ②账本共享 ③服务端VIP默认） */
   private resolveText(req: any, ledgerId?: string | null) {
     return this.llmResolver.resolveText({
       userId: req.user?.id,
-      username: req.user?.username,
       ledgerId: ledgerId ?? req.user?.currentLedgerId ?? null,
       header: headerLlmCfg(req),
     });
@@ -89,13 +88,11 @@ export class AiController {
     // BYOK：三层解析（文本必须有，视觉可为空——没有就不支持图片导入）
     const llmText = await this.llmResolver.resolveText({
       userId: req.user?.id,
-      username: req.user?.username,
       ledgerId: body.ledgerId,
       header: headerLlmCfg(req),
     });
     const llmVision = await this.llmResolver.resolveVision({
       userId: req.user?.id,
-      username: req.user?.username,
       ledgerId: body.ledgerId,
       header: headerLlmCfg(req),
     });
@@ -171,12 +168,12 @@ export class AiController {
 
   // ── BYOK：账本共享 LLM 配置 ───────────────────────────────
 
-  /** 当前账本的共享配置视图（不含 Key）+ 是否允许用服务端默认 */
+  /** 当前账本的共享配置视图（不含 Key）+ 是否 VIP（可用服务端默认） */
   @Get('llm-config')
   getLlmConfig(@Req() req: any, @Query('ledgerId') ledgerId?: string) {
     const lid = ledgerId || req.user?.currentLedgerId;
     if (!lid) throw new BadRequestException('缺少 ledgerId');
-    return this.llmResolver.getConfigView(lid, req.user.id, req.user?.username);
+    return this.llmResolver.getConfigView(lid, req.user.id);
   }
 
   /** 保存/更新账本共享配置（Key 加密落库；仅配置者可改） */
@@ -222,7 +219,8 @@ export class AiController {
     try {
       await llm.model.chat(
         [{ role: 'user', content: '回复"OK"两个字母即可' }],
-        { maxTokens: 8 },
+        // 给足余量：思考类模型会先消耗一部分 token 在推理上，8 个可能吐不出内容
+        { maxTokens: 64 },
       );
       return { ok: true, source: llm.source, model: llm.name };
     } catch (e: any) {
