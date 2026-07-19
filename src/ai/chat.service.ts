@@ -257,8 +257,11 @@ export class ChatService {
     aggregation?: { task: 'merchant'; billIds: string[]; period: string };
   }> {
     const [start, end] = parsePeriod(args?.period);
+    // 收支口径：转账腿与股票纸面盈亏都不算收支（与统计/预算一致）
     const where: Prisma.BillWhereInput = {
       ledgerId,
+      isTransfer: false,
+      source: { not: 'stock' },
       date: { gte: start, lte: end },
     };
     if (args?.type === 'expense' || args?.type === 'income') {
@@ -437,6 +440,8 @@ export class ChatService {
         where: {
           ledgerId,
           type: 'expense',
+          isTransfer: false,
+          source: { not: 'stock' },
           categoryId: { in: ids },
           date: { gte: start, lte: end },
         },

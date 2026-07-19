@@ -94,8 +94,9 @@ export class CfoService {
     since90.setDate(since90.getDate() - 90);
 
     // 仅取明文字段：绝不 select noteCipher
+    // 排除股票纸面盈亏（source='stock'）——浮盈浮亏不该触发大额支出/超支等建议
     const rawRecent = await this.prisma.bill.findMany({
-      where: { ledgerId, date: { gte: since90 } },
+      where: { ledgerId, source: { not: 'stock' }, date: { gte: since90 } },
       select: {
         id: true,
         accountId: true,

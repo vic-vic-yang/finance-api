@@ -16,6 +16,17 @@ export class QueryBillDto {
   @IsEnum(['income', 'expense'])
   type?: 'income' | 'expense';
 
+  /// 'true' = 只看转账；'false' = 排除转账；缺省 = 全部。
+  /// 注意：传了 type（筛收入/支出）时自动排除转账腿——转账不算收支。
+  @IsOptional()
+  @IsString()
+  isTransfer?: string;
+
+  /// 按来源过滤（如 'stock' 只看股票盈亏）；另注意：传了 type 时自动排除 source='stock'
+  @IsOptional()
+  @IsString()
+  source?: string;
+
   @IsOptional()
   @IsString()
   categoryId?: string;

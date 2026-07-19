@@ -63,6 +63,7 @@ export class BudgetsService {
         ledgerId,
         type: 'expense',
         isTransfer: false,
+        source: { not: 'stock' }, // 股票纸面盈亏不算预算消耗
         date: { gte: start, lte: end },
         ...(ids.length ? { categoryId: { in: ids } } : {}),
       },
@@ -205,6 +206,7 @@ export class BudgetsService {
       ledgerId,
       type: 'expense',
       isTransfer: false, // 转账不算预算消耗
+      source: { not: 'stock' }, // 股票纸面盈亏也不算
       date: { gte: start, lte: end },
     };
     if (ids.length) where.categoryId = { in: ids };

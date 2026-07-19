@@ -7,7 +7,8 @@ import { StockService } from './stock.service';
 /**
  * 股票持仓自动结算：
  *  - 关联了账户的持仓，每天 15:00（A股收盘后）按最新价计算「当日盈亏」，
- *    在关联账户记一条转账类流水(isTransfer，不计收支)，并把账户余额更新为最新市值。
+ *    在关联账户记一条流水（source='stock' 的普通收支账单，各统计聚合点按
+ *    source 排除、不计收支），并把账户余额更新为最新市值。
  *  - 幂等：同一天只结算一次（lastCalcAt 当天则跳过）。
  *  - 自愈：15:00 没跑成功（后端没开/失败），下次进入程序拉股票列表时补算
  *    （settleForUser）；后端重启时也补算（onModuleInit）。仅在 ≥15:00 才结算当天，
@@ -188,7 +189,9 @@ export class StockHoldingService implements OnModuleInit {
             noteDekVer: 0,
             date: now,
             source: 'stock',
-            isTransfer: true, // 纸面盈亏：不计收支，仅反映市值变化
+            // 纸面盈亏是普通收支账单（有真实分类/图标/备注），
+            // 不计入收支统计靠各聚合点排除 source='stock' 实现，而不是误用 isTransfer
+            isTransfer: false,
           },
         });
       }

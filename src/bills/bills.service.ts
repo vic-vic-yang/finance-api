@@ -40,12 +40,25 @@ export class BillsService {
   async findAll(ledgerId: string, query: QueryBillDto) {
     const {
       page = 1, limit = 20, type, categoryId, accountId, userId, startDate, endDate,
-      minAmount, maxAmount, categoryIds, accountIds, userIds,
+      minAmount, maxAmount, categoryIds, accountIds, userIds, isTransfer, source,
     } = query;
     const skip = (page - 1) * Number(limit);
 
     const where: Prisma.BillWhereInput = { ledgerId };
     if (type) where.type = type;
+    // 转账过滤：显式要转账 → 只看转账；按类型筛收支 或 显式排除 → 不看转账腿
+    if (isTransfer === 'true') {
+      where.isTransfer = true;
+    } else if (isTransfer === 'false' || type) {
+      where.isTransfer = false;
+    }
+    // 来源过滤：显式指定（如 source='stock' 只看股票盈亏）；
+    // 按类型筛收支时自动排除股票纸面盈亏（与统计口径一致）
+    if (source) {
+      where.source = source;
+    } else if (type) {
+      where.source = { not: 'stock' };
+    }
     // 分类筛选（多选优先）：一级分类自动带上其子分类（与预算/统计口径一致）
     const catList = (categoryIds ?? categoryId ?? '')
       .split(',')
@@ -88,11 +101,23 @@ export class BillsService {
       }),
       this.prisma.bill.count({ where }),
       this.prisma.bill.aggregate({
-        // 转账账单不计入收支汇总（但仍出现在上面的账单列表里）
-        where: { ...where, type: 'income', isTransfer: false }, _sum: { amount: true },
+        // 转账账单与股票纸面盈亏不计入收支汇总（但仍出现在上面的账单列表里）
+        where: {
+          ...where,
+          type: 'income',
+          isTransfer: false,
+          source: { not: 'stock' },
+        },
+        _sum: { amount: true },
       }),
       this.prisma.bill.aggregate({
-        where: { ...where, type: 'expense', isTransfer: false }, _sum: { amount: true },
+        where: {
+          ...where,
+          type: 'expense',
+          isTransfer: false,
+          source: { not: 'stock' },
+        },
+        _sum: { amount: true },
       }),
     ]);
 
@@ -144,6 +169,14 @@ export class BillsService {
 
       const amount = new Prisma.Decimal(dto.amount);
       const noteCipher = Buffer.from(dto.noteCipher, 'base64');
+      const billDate = dto.date ? new Date(dto.date) : new Date();
+
+      // 补记"历史起点之前"的账单：只把初始余额往前推、不动当前余额。
+      // 初始余额快照本就包含那之前的资金状况，再动余额就是双计（与导入自愈同语义）。
+      const preHistory = await this._isPreHistory(
+        tx, dto.accountId, billDate, null,
+      );
+
       const bill = await tx.bill.create({
         data: {
           ledgerId,
@@ -154,12 +187,22 @@ export class BillsService {
           amount,
           noteCipher,
           noteDekVer: dto.noteDekVer,
-          date: dto.date ? new Date(dto.date) : new Date(),
+          date: billDate,
         },
         include: BILL_INCLUDE,
       });
 
-      if (dto.type === 'income') {
+      if (preHistory) {
+        // 初始前移：补记支出 → 起点钱更多；补记收入 → 起点钱更少
+        await tx.account.update({
+          where: { id: dto.accountId },
+          data: {
+            initialBalance: {
+              increment: dto.type === 'income' ? -dto.amount : dto.amount,
+            },
+          },
+        });
+      } else if (dto.type === 'income') {
         await tx.account.update({
           where: { id: dto.accountId },
           data: { balance: { increment: dto.amount } },
@@ -174,10 +217,46 @@ export class BillsService {
     });
   }
 
+  /**
+   * 是否"历史起点之前"的账单：早于该账户现有最早账单日期
+   * （账户还没有账单时，以账户创建日作为起点）。
+   */
+  private async _isPreHistory(
+    tx: any,
+    accountId: string,
+    date: Date,
+    excludeBillId: string | null,
+  ): Promise<boolean> {
+    const earliest = await tx.bill.findFirst({
+      where: {
+        accountId,
+        ...(excludeBillId ? { id: { not: excludeBillId } } : {}),
+      },
+      orderBy: { date: 'asc' },
+      select: { date: true },
+    });
+    let t = earliest?.date;
+    if (!t) {
+      const acc = await tx.account.findUnique({
+        where: { id: accountId },
+        select: { createdAt: true },
+      });
+      t = acc?.createdAt;
+    }
+    return t != null && date < t;
+  }
+
   async update(ledgerId: string, userId: string, id: string, dto: UpdateBillDto) {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.bill.findFirst({ where: { id, ledgerId } });
       if (!existing) throw new NotFoundException('账单不存在');
+
+      // 股票盈亏账单由每日收盘结算自动维护（且不参与余额冲正），只读
+      if (existing.source === 'stock') {
+        throw new BadRequestException(
+          '股票盈亏由每日结算自动维护，不可修改；如需调整请改持仓或等下次结算',
+        );
+      }
 
       // 转账/借贷类账单（isTransfer）：整条转账（双腿）可编辑——金额/账户/日期
       // 都允许改，但必须找到配对腿同步 + 余额按"冲正旧账 → 记新账"重算；
@@ -227,9 +306,23 @@ export class BillsService {
       }
 
       const oldAmount = Number(existing.amount);
-      // 转账腿的余额调整走下面的"配对同步"逻辑，这里不冲正
+      // 普通账单：旧值逆向 + 新值正向，按"是否历史起点之前"分别落到 余额/初始余额
+      // （转账腿的余额调整走下面的"配对同步"逻辑，这里不动）
       if (!existing.isTransfer) {
-        if (existing.type === 'income') {
+        const oldPre = await this._isPreHistory(
+          tx, existing.accountId, existing.date, existing.id,
+        );
+        // 撤销旧值
+        if (oldPre) {
+          await tx.account.update({
+            where: { id: existing.accountId },
+            data: {
+              initialBalance: {
+                increment: existing.type === 'income' ? oldAmount : -oldAmount,
+              },
+            },
+          });
+        } else if (existing.type === 'income') {
           await tx.account.update({
             where: { id: existing.accountId },
             data: { balance: { decrement: oldAmount } },
@@ -265,7 +358,21 @@ export class BillsService {
       });
 
       if (!existing.isTransfer) {
-        if (newType === 'income') {
+        const newDate = dto.date ? new Date(dto.date) : existing.date;
+        const newPre = await this._isPreHistory(
+          tx, newAccountId, newDate, existing.id,
+        );
+        // 应用新值
+        if (newPre) {
+          await tx.account.update({
+            where: { id: newAccountId },
+            data: {
+              initialBalance: {
+                increment: newType === 'income' ? -newAmount : newAmount,
+              },
+            },
+          });
+        } else if (newType === 'income') {
           await tx.account.update({
             where: { id: newAccountId },
             data: { balance: { increment: newAmount } },
@@ -503,10 +610,28 @@ export class BillsService {
       const bill = await tx.bill.findFirst({ where: { id, ledgerId } });
       if (!bill) throw new NotFoundException('账单不存在');
 
+      // 股票盈亏账单由每日收盘结算自动维护，只读；删除会错误冲正账户余额
+      if (bill.source === 'stock') {
+        throw new BadRequestException('股票盈亏由每日结算自动维护，不可删除');
+      }
+
       await tx.bill.delete({ where: { id } });
 
       const amount = Number(bill.amount);
-      if (bill.type === 'income') {
+      // 删的是"历史起点之前"的账单 → 回退初始前移，不动当前余额
+      const preHistory = await this._isPreHistory(
+        tx, bill.accountId, bill.date, bill.id,
+      );
+      if (preHistory) {
+        await tx.account.update({
+          where: { id: bill.accountId },
+          data: {
+            initialBalance: {
+              increment: bill.type === 'income' ? amount : -amount,
+            },
+          },
+        });
+      } else if (bill.type === 'income') {
         await tx.account.update({
           where: { id: bill.accountId },
           data: { balance: { decrement: amount } },

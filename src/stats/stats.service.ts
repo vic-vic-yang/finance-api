@@ -16,8 +16,12 @@ export class StatsService {
     const start = startDate ? new Date(startDate) : null;
     const end = endDate ? new Date(`${endDate}T23:59:59.999`) : null;
 
-    // 转账账单（isTransfer）不计入收支统计
-    const where: Prisma.BillWhereInput = { ledgerId, isTransfer: false };
+    // 转账账单（isTransfer）与股票纸面盈亏（source='stock'）不计入收支统计
+    const where: Prisma.BillWhereInput = {
+      ledgerId,
+      isTransfer: false,
+      source: { not: 'stock' },
+    };
     if (start || end) {
       where.date = {};
       if (start) (where.date as any).gte = start;
@@ -28,6 +32,7 @@ export class StatsService {
     const conditions: Prisma.Sql[] = [
       Prisma.sql`b."ledgerId" = ${ledgerId}`,
       Prisma.sql`b."isTransfer" = false`,
+      Prisma.sql`b."source" <> 'stock'`,
     ];
     if (start) conditions.push(Prisma.sql`b.date >= ${start}`);
     if (end) conditions.push(Prisma.sql`b.date <= ${end}`);

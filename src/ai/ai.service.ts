@@ -684,6 +684,42 @@ export class AiService implements OnModuleInit {
           where: { id: accId },
           data: { balance: bal },
         });
+
+        // 初始余额自愈：存在早于「账户创建日」的流水时，说明用户导入了
+        // 初始余额日之前的账单（起点错位会"双计"）。用最早的联机余额反推
+        // 流水起点的笔前余额，回写为初始余额——银行余额列是权威值，
+        // 此后「初始余额 + 全部流水 = 当前余额」恒成立。
+        const acc = await this.prisma.account.findUnique({
+          where: { id: accId },
+          select: { createdAt: true, initialBalance: true },
+        });
+        if (acc) {
+          const firstAnchor = await this.prisma.bill.findFirst({
+            where: {
+              accountId: accId,
+              bankBalance: { not: null },
+              date: { lt: acc.createdAt },
+            },
+            orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
+            select: { date: true, type: true, amount: true, bankBalance: true },
+          });
+          if (firstAnchor?.bankBalance) {
+            const preBalance =
+              firstAnchor.type === 'income'
+                ? new Prisma.Decimal(firstAnchor.bankBalance).minus(firstAnchor.amount)
+                : new Prisma.Decimal(firstAnchor.bankBalance).plus(firstAnchor.amount);
+            const current = new Prisma.Decimal(acc.initialBalance ?? 0);
+            if (preBalance.minus(current).abs().greaterThan('0.01')) {
+              await this.prisma.account.update({
+                where: { id: accId },
+                data: { initialBalance: preBalance },
+              });
+              this.logger.log(
+                `初始余额自愈 (${accId})：${current} → ${preBalance}（流水起点 ${firstAnchor.date.toISOString().slice(0, 10)}）`,
+              );
+            }
+          }
+        }
       } catch (e) {
         this.logger.warn(`余额校准失败 (${accId}): ${e}`);
       }

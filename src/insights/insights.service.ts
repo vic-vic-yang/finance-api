@@ -116,6 +116,7 @@ export class InsightsService {
         ledgerId,
         type: 'expense',
         isTransfer: false,
+        source: { not: 'stock' }, // 股票纸面盈亏不计洞察
         date: { gte: since },
       },
       include: { category: { select: { name: true, icon: true } } },
@@ -131,6 +132,7 @@ export class InsightsService {
         ledgerId,
         type: 'expense',
         isTransfer: false,
+        source: { not: 'stock' }, // 股票纸面盈亏不计洞察
         date: { gte: threeMonthsAgo, lt: since }, // 用更早的当基线
       },
       _avg: { amount: true },
@@ -188,6 +190,7 @@ export class InsightsService {
           ledgerId,
           type: 'expense',
           isTransfer: false,
+        source: { not: 'stock' }, // 股票纸面盈亏不计洞察
           date: { gte: thisStart },
         },
         _sum: { amount: true },
@@ -198,6 +201,7 @@ export class InsightsService {
           ledgerId,
           type: 'expense',
           isTransfer: false,
+        source: { not: 'stock' }, // 股票纸面盈亏不计洞察
           date: { gte: lastStart, lte: lastEnd },
         },
         _sum: { amount: true },
@@ -273,6 +277,7 @@ export class InsightsService {
           ledgerId,
           type: 'expense',
           isTransfer: false,
+        source: { not: 'stock' }, // 股票纸面盈亏不计洞察
           categoryId: { in: ids },
           date: { gte: start, lte: end },
         },
@@ -314,6 +319,7 @@ export class InsightsService {
             ledgerId,
             type: 'expense',
             isTransfer: false,
+        source: { not: 'stock' }, // 股票纸面盈亏不计洞察
             categoryId: { in: ids },
             date: { gte: start, lte: end },
           },

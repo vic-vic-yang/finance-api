@@ -228,21 +228,20 @@ export class GoalsService {
   private async _savedFromBills(g: any): Promise<number> {
     const now = new Date();
     const start: Date = g.startDate;
+    // 只算真收支：转账（账户互转）与股票纸面盈亏都不是"存下来的钱"
+    const base = {
+      ledgerId: g.ledgerId,
+      isTransfer: false,
+      source: { not: 'stock' as const },
+      date: { gte: start, lte: now },
+    };
     const [incAgg, expAgg] = await Promise.all([
       this.prisma.bill.aggregate({
-        where: {
-          ledgerId: g.ledgerId,
-          type: 'income',
-          date: { gte: start, lte: now },
-        },
+        where: { ...base, type: 'income' },
         _sum: { amount: true },
       }),
       this.prisma.bill.aggregate({
-        where: {
-          ledgerId: g.ledgerId,
-          type: 'expense',
-          date: { gte: start, lte: now },
-        },
+        where: { ...base, type: 'expense' },
         _sum: { amount: true },
       }),
     ]);
