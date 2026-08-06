@@ -22,6 +22,11 @@ import { AppUpdateModule } from './app-update/app-update.module';
 import { LoansModule } from './loans/loans.module';
 import { AdminModule } from './admin/admin.module';
 import { UploadsModule } from './uploads/uploads.module';
+import { ForecastModule } from './forecast/forecast.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { ReconcileModule } from './reconcile/reconcile.module';
+import { HealthModule } from './health/health.module';
+import { BriefingModule } from './briefing/briefing.module';
 
 @Module({
   imports: [
@@ -51,6 +56,11 @@ import { UploadsModule } from './uploads/uploads.module';
     LoansModule,
     AdminModule,
     UploadsModule,
+    ForecastModule,
+    NotificationsModule,
+    ReconcileModule,
+    HealthModule,
+    BriefingModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

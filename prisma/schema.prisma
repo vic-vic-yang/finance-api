@@ -67,6 +67,8 @@ model User {
   vipExpiresAt    DateTime?
   /// VIP 备注（来源：手动开通 / 活动 / 付费单号…）
   vipNote         String?
+  /// 每周管家简报开关：false 时周一调度器跳过该用户
+  briefingEnabled Boolean        @default(true)
   /// bcrypt 密码哈希（12 rounds）
   password        String
   createdAt       DateTime       @default(now())
@@ -79,6 +81,9 @@ model User {
   categories      Category[] // 用户自建分类（系统分类 userId=null）
   ownedAccounts   Account[]      @relation("AccountOwner")
   aiImports       AiImport[]     @relation("UserAiImports")
+  aiCorrections   AiCorrection[] @relation("UserAiCorrections")
+  notifications   Notification[]
+  briefings       Briefing[]
 
   // ── 国密 SM2 用户密钥对（端到端加密基础）───────────────────
   /// SM2 公钥（hex 字符串，未压缩 04|x|y 共 130 个字符）
@@ -114,8 +119,12 @@ model Ledger {
   categories Category[]
   currentFor User[]          @relation("CurrentLedger")
   aiImports  AiImport[]      @relation("LedgerAiImports")
+  aiCorrections AiCorrection[] @relation("LedgerAiCorrections")
   recurring  RecurringBill[]
   proposals  Proposal[]
+  notifications Notification[]
+  autoRules  CfoAutoRule[]
+  briefings  Briefing[]
 
   @@index([ownerId])
 }
@@ -319,6 +328,8 @@ model Bill {
   noteDekVer   Int      @default(1)
   /// 交易日期
   date         DateTime
+  /// 自动入账所属周期；仅系统自动入账填写，用于数据库级幂等
+  autoDepositPeriod DateTime?
   /// 平台交易订单号（支付宝/微信），用于同源稳健去重；非平台来源为 null
   externalId   String?
   /// 来源渠道：alipay / wechat / bank / manual
@@ -337,6 +348,7 @@ model Bill {
   @@index([ledgerId, date(sort: Desc)])
   @@index([ledgerId, externalId])
   @@index([ledgerId, accountId, date])
+  @@unique([accountId, autoDepositPeriod])
 }
 
 /// 分类纠正记忆：商户(哈希) → 用户手动修正的分类。
@@ -353,6 +365,28 @@ model CategoryCorrection {
 
   @@unique([ledgerId, merchantHash])
   @@index([ledgerId])
+}
+
+/// AI 解析纠正（few-shot 自进化）：用户复核导入草稿时改过的「商户 → 分类」。
+/// 与 CategoryCorrection（哈希、精确套用）互补：这里存商户名明文，
+/// 解析 prompt 时把最近纠正作为 few-shot 样例注入，让 LLM 越用越准。
+/// 导入草稿在服务端本来就是瞬时明文，只存商户名（不存金额/备注），隐私面可控。
+model AiCorrection {
+  id       String @id @default(cuid())
+  ledgerId String
+  ledger   Ledger @relation("LedgerAiCorrections", fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 做出纠正的用户（复核草稿的人）
+  userId   String
+  user     User   @relation("UserAiCorrections", fields: [userId], references: [id], onDelete: Cascade)
+  /// 商户/对方名的规范化明文（trim + 去空白 + 小写，最长 100）
+  merchantKey String @db.VarChar(100)
+  /// 用户手动指定的分类 ID
+  categoryId  String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([ledgerId, merchantKey])
+  @@index([ledgerId, merchantKey])
 }
 
 /// AI 导入记录：文件上传后的处理状态机，含草稿/去重统计/LLM 原始输出
@@ -559,37 +593,29 @@ model ProposalFeedback {
   @@unique([ledgerId, type])
 }
 
-/// 每日财经新闻：RSS 聚合 + LLM 富化结果，全局共享，按 url 去重
-model NewsArticle {
-  id          String   @id @default(cuid())
-  /// 原标题
-  title       String
-  /// LLM 翻译的中文标题（列表/详情主标题用）；无 LLM 时回退原标题
-  titleZh     String?
-  /// LLM 中文摘要；无 LLM 时回退 RSS 原始描述
-  summary     String?
-  /// 来源名（CNBC / MarketWatch / 新浪财经 …）
-  source      String
-  /// 原文链接（唯一，跨日去重用）
-  url         String   @unique
-  imageUrl    String?
-  /// 标签：股市 / 宏观 / 加密 / 科技 / 政策 …（LLM 分类）
-  category    String?
-  /// 重要性评分 0-100（LLM 给，用于排序）
-  importance  Int      @default(0)
-  /// 情绪：positive / neutral / negative
-  sentiment   String?
-  /// 抓取的原文正文（纯文本，懒加载，用户打开详情时才抓）
-  content     String?
-  /// LLM 基于正文提炼的要点分析（懒加载，打开详情时生成并缓存）
-  analysis    String?
-  /// 原文发布时间
-  publishedAt DateTime
-  /// 抓取时间
-  fetchedAt   DateTime @default(now())
+/// 通知中心：服务端主动生成的用户级通知（CFO 预警 / 系统消息等）。
+/// 由定时扫描任务写入；同一 (userId, type, payload.dedupeKey) 只通知一次（应用层保证）。
+model Notification {
+  id        String   @id @default(cuid())
+  /// 接收用户
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 关联账本（系统级通知为 null）
+  ledgerId  String?
+  ledger    Ledger?  @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 通知类型：cfo_proposal / system …
+  type      String
+  /// 标题
+  title     String
+  /// 正文
+  body      String
+  /// 结构化负载（dedupeKey / proposalId / severity / detectorType 等）
+  payload   Json?
+  /// 阅读时间；null = 未读
+  readAt    DateTime?
+  createdAt DateTime @default(now())
 
-  @@index([publishedAt])
-  @@index([importance])
+  @@index([userId, readAt])
 }
 
 /// 股票 AI 分析快照：用户查询过的股票分析结果，每次查询存一条
@@ -745,4 +771,42 @@ model PicksMemory {
   /// JSON: 样本数/胜率/平均收益/分动作命中等
   stats     String?
   updatedAt DateTime @updatedAt
+}
+
+/// CFO 主动式 agent 的自动执行规则：用户按动作类型授权后，
+/// 低风险提议可不经逐条确认直接执行（仍在提议列表留痕）。
+model CfoAutoRule {
+  id         String   @id @default(cuid())
+  ledgerId   String
+  ledger     Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 动作类型，如 adjust_budget / recategorize_bill（白名单制，高危动作不允许自动）
+  actionType String
+  enabled    Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([ledgerId, actionType])
+}
+
+/// 每周管家简报：上周（周一~周日）vs 上上周的聚合事实 + 简报正文。
+/// factsJson 只含聚合数字 / 分类名 / 日期，绝不含账单备注（E2E 密文服务端解不开）。
+/// (userId, ledgerId, weekStart) 唯一：调度器重跑幂等，不会重复生成。
+model Briefing {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerId  String
+  ledger    Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 简报覆盖周的周一（本地时区 00:00）
+  weekStart DateTime
+  /// 聚合事实 JSON（前端结构化渲染 + LLM 输入快照）
+  factsJson String
+  /// 简报正文（LLM 生成或模板兜底）
+  narrative String
+  /// 正文来源：llm / template
+  source    String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, ledgerId, weekStart])
+  @@index([userId, ledgerId, createdAt(sort: Desc)])
 }

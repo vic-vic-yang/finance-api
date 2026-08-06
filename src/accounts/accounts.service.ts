@@ -615,21 +615,44 @@ export class AccountsService {
       const userId = a.ownerId ?? ledger?.ownerId;
       if (!userId) continue;
       for (const periodDate of periods) {
-        await this.prisma.$transaction([
-          this.prisma.bill.create({
-            data: {
-              ledgerId, userId, accountId: a.id, categoryId,
-              type: 'income', amount,
-              noteCipher: systemNoteCipher,
-              noteDekVer: 0,  // 0 = 系统占位
-              date: periodDate,
+        try {
+          await this.prisma.$transaction(async (tx) => {
+            await tx.bill.create({
+              data: {
+                ledgerId, userId, accountId: a.id, categoryId,
+                type: 'income', amount,
+                noteCipher: systemNoteCipher,
+                noteDekVer: 0,  // 0 = 系统占位
+                date: periodDate,
+                source: 'auto_deposit',
+                autoDepositPeriod: periodDate,
+              } as any,
+            });
+            await tx.account.update({
+              where: { id: a.id },
+              data: { balance: { increment: amount }, lastAutoProcessedAt: periodDate },
+            });
+          });
+        } catch (error) {
+          if (
+            !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+            error.code !== 'P2002'
+          ) {
+            throw error;
+          }
+          // 另一请求已创建同一账户/周期的账单。推进游标，避免以后反复重试，
+          // 但绝不再次增加余额；lt 条件也防止并发请求把游标倒退。
+          await this.prisma.account.updateMany({
+            where: {
+              id: a.id,
+              OR: [
+                { lastAutoProcessedAt: null },
+                { lastAutoProcessedAt: { lt: periodDate } },
+              ],
             },
-          }),
-          this.prisma.account.update({
-            where: { id: a.id },
-            data: { balance: { increment: amount }, lastAutoProcessedAt: periodDate },
-          }),
-        ]);
+            data: { lastAutoProcessedAt: periodDate },
+          });
+        }
       }
     }
   }

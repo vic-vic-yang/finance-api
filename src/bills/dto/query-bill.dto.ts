@@ -27,6 +27,12 @@ export class QueryBillDto {
   @IsString()
   source?: string;
 
+  /// 'true' 时列表包含股票纸面盈亏（账户详情余额轨迹用）；
+  /// 缺省排除——未卖出的纸面盈亏不是真收支，不出现在账单列表
+  @IsOptional()
+  @IsString()
+  includeStock?: string;
+
   @IsOptional()
   @IsString()
   categoryId?: string;

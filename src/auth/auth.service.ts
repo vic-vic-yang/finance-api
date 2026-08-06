@@ -25,6 +25,7 @@ export function shapeUser(user: {
   nickname?: string | null;
   role?: string | null;
   currentLedgerId?: string | null;
+  briefingEnabled?: boolean;
 }) {
   const display = (user.nickname ?? '').trim();
   return {
@@ -35,6 +36,9 @@ export function shapeUser(user: {
     role: user.role ?? 'user',
     ...(user.currentLedgerId !== undefined
       ? { currentLedgerId: user.currentLedgerId }
+      : {}),
+    ...(user.briefingEnabled !== undefined
+      ? { briefingEnabled: user.briefingEnabled }
       : {}),
   };
 }
@@ -176,8 +180,19 @@ export class AuthService {
         username: user.username,
         nickname: user.nickname,
         currentLedgerId: user.currentLedgerId,
+        briefingEnabled: user.briefingEnabled,
       }),
     };
+  }
+
+  /// 每周管家简报开关（我的 → 设置）
+  async setBriefingEnabled(userId: string, enabled: boolean) {
+    const user = await this.prisma.user.update({
+      where: { id: userId },
+      data: { briefingEnabled: enabled },
+      select: { briefingEnabled: true },
+    });
+    return { briefingEnabled: user.briefingEnabled };
   }
 
   /// 改密码：客户端已经用 PBKDF2(新密码, 同 salt) 重新加密了 privKey，

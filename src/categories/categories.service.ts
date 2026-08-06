@@ -2,188 +2,24 @@ import {
   Injectable,
   NotFoundException,
   ForbiddenException,
+  BadRequestException,
   OnModuleInit,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
-
-// 一级系统分类
-const SYSTEM_CATEGORIES = [
-  // ── 收入 ──
-  { name: '工资',     type: 'income',  icon: '💰', color: '#4CAF50' },
-  { name: '奖金',     type: 'income',  icon: '🎁', color: '#8BC34A' },
-  { name: '兼职副业', type: 'income',  icon: '💼', color: '#CDDC39' },
-  { name: '投资理财', type: 'income',  icon: '📈', color: '#00BCD4' },
-  { name: '报销',     type: 'income',  icon: '🧾', color: '#03A9F4' },
-  { name: '红包礼金', type: 'income',  icon: '🧧', color: '#F44336' },
-  { name: '其他收入', type: 'income',  icon: '➕', color: '#9C27B0' },
-  // ── 支出 ──
-  { name: '餐饮',     type: 'expense', icon: '🍜', color: '#F44336' },
-  { name: '交通',     type: 'expense', icon: '🚌', color: '#FF9800' },
-  { name: '购物',     type: 'expense', icon: '🛍️', color: '#E91E63' },
-  { name: '住房',     type: 'expense', icon: '🏠', color: '#795548' },
-  { name: '娱乐',     type: 'expense', icon: '🎮', color: '#FFC107' },
-  { name: '医疗健康', type: 'expense', icon: '🏥', color: '#009688' },
-  { name: '教育',     type: 'expense', icon: '📚', color: '#3F51B5' },
-  { name: '通讯',     type: 'expense', icon: '📱', color: '#2196F3' },
-  { name: '人情社交', type: 'expense', icon: '🎎', color: '#F06292' },
-  { name: '育儿亲子', type: 'expense', icon: '👶', color: '#FF5722' },
-  { name: '汽车',     type: 'expense', icon: '🚗', color: '#607D8B' },
-  { name: '宠物',     type: 'expense', icon: '🐾', color: '#FF7043' },
-  { name: '运动健身', type: 'expense', icon: '🏃', color: '#4CAF50' },
-  { name: '美容美发', type: 'expense', icon: '💇', color: '#BA68C8' },
-  { name: '保险',     type: 'expense', icon: '🛡️', color: '#26C6DA' },
-  { name: '其他支出', type: 'expense', icon: '➖', color: '#9E9E9E' },
-];
-
-// 系统二级分类（parentName -> 子项列表）
-const SYSTEM_SUBCATEGORIES: Record<string, Array<{ name: string; icon: string }>> = {
-  // ── 收入 ──
-  工资: [
-    { name: '基本工资', icon: '💵' },
-    { name: '绩效奖金', icon: '📊' },
-    { name: '加班费',   icon: '⏰' },
-    { name: '补贴津贴', icon: '💴' },
-  ],
-  奖金: [
-    { name: '年终奖',   icon: '🎊' },
-    { name: '项目奖金', icon: '🏆' },
-    { name: '提成',     icon: '💹' },
-    { name: '全勤奖',   icon: '✅' },
-  ],
-  兼职副业: [
-    { name: '自由职业', icon: '💻' },
-    { name: '接单外包', icon: '🧾' },
-    { name: '稿费',     icon: '✍️' },
-    { name: '直播带货', icon: '📹' },
-    { name: '摆摊',     icon: '🛒' },
-  ],
-  投资理财: [
-    { name: '股票基金', icon: '📈' },
-    { name: '利息',     icon: '🏦' },
-    { name: '分红',     icon: '💹' },
-    { name: '房租收入', icon: '🏠' },
-    { name: '数字货币', icon: '🪙' },
-  ],
-  报销: [
-    { name: '差旅报销', icon: '🧳' },
-    { name: '餐补',     icon: '🍱' },
-    { name: '交通报销', icon: '🚕' },
-    { name: '医疗报销', icon: '🏥' },
-  ],
-  红包礼金: [
-    { name: '节日红包', icon: '🧧' },
-    { name: '压岁钱',   icon: '🎀' },
-    { name: '份子钱',   icon: '💝' },
-  ],
-  其他收入: [
-    { name: '退款',     icon: '↩️' },
-    { name: '二手变卖', icon: '🏷️' },
-    { name: '中奖',     icon: '🎯' },
-    { name: '意外所得', icon: '✨' },
-  ],
-  // ── 支出 ──
-  餐饮: [
-    { name: '早餐',     icon: '🥐' },
-    { name: '午餐',     icon: '🍱' },
-    { name: '晚餐',     icon: '🍲' },
-    { name: '外卖',     icon: '🥡' },
-    { name: '咖啡饮品', icon: '☕' },
-    { name: '零食水果', icon: '🍿' },
-    { name: '买菜食材', icon: '🥬' },
-    { name: '聚餐请客', icon: '🥂' },
-  ],
-  交通: [
-    { name: '公交地铁', icon: '🚇' },
-    { name: '打车',     icon: '🚖' },
-    { name: '火车',     icon: '🚂' },
-    { name: '高铁',     icon: '🚄' },
-    { name: '飞机',     icon: '✈️' },
-    { name: '加油充电', icon: '⛽' },
-    { name: '停车',     icon: '🅿️' },
-    { name: '过路费',   icon: '🛣️' },
-  ],
-  购物: [
-    { name: '日用品',   icon: '🧴' },
-    { name: '数码电子', icon: '💻' },
-    { name: '家电家居', icon: '🛋️' },
-    { name: '服饰鞋包', icon: '👕' },
-    { name: '美妆个护', icon: '💄' },
-    { name: '书籍文具', icon: '📖' },
-  ],
-  住房: [
-    { name: '房租',     icon: '🏠' },
-    { name: '房贷',     icon: '🏦' },
-    { name: '水费',     icon: '💧' },
-    { name: '电费',     icon: '⚡' },
-    { name: '燃气费',   icon: '🔥' },
-    { name: '物业',     icon: '🛎️' },
-    { name: '维修装修', icon: '🔧' },
-    { name: '家政保洁', icon: '🧹' },
-  ],
-  娱乐: [
-    { name: '电影演出', icon: '🎬' },
-    { name: '游戏',     icon: '🎮' },
-    { name: 'KTV',      icon: '🎤' },
-    { name: '会员订阅', icon: '🎟️' },
-    { name: '旅游度假', icon: '✈️' },
-    { name: '景点门票', icon: '🎫' },
-  ],
-  医疗健康: [
-    { name: '门诊挂号', icon: '🏥' },
-    { name: '药品',     icon: '💊' },
-    { name: '体检',     icon: '🩺' },
-    { name: '牙科',     icon: '🦷' },
-    { name: '保健养生', icon: '🧘' },
-  ],
-  教育: [
-    { name: '学费培训', icon: '🎓' },
-    { name: '教材文具', icon: '✏️' },
-    { name: '考试报名', icon: '📝' },
-  ],
-  通讯: [
-    { name: '话费',     icon: '📞' },
-    { name: '宽带',     icon: '📡' },
-    { name: '数字订阅', icon: '📲' },
-  ],
-  人情社交: [
-    { name: '红包礼金', icon: '🧧' },
-    { name: '份子钱',   icon: '💝' },
-    { name: '请客送礼', icon: '🎁' },
-  ],
-  育儿亲子: [
-    { name: '奶粉尿布', icon: '🍼' },
-    { name: '玩具童装', icon: '🧸' },
-    { name: '早教',     icon: '🏫' },
-  ],
-  汽车: [
-    { name: '车贷',     icon: '🏦' },
-    { name: '保险',     icon: '🛡️' },
-    { name: '保养维修', icon: '🔧' },
-    { name: '洗车年检', icon: '🚿' },
-  ],
-  宠物: [
-    { name: '粮食零食', icon: '🐶' },
-    { name: '医疗保健', icon: '💉' },
-    { name: '用品玩具', icon: '🦴' },
-  ],
-  运动健身: [
-    { name: '健身瑜伽', icon: '🏋️' },
-    { name: '器材装备', icon: '⚽' },
-    { name: '球类游泳', icon: '🎾' },
-  ],
-  美容美发: [
-    { name: '理发造型', icon: '💈' },
-    { name: '美容护肤', icon: '💆' },
-    { name: '美甲美睫', icon: '💅' },
-    { name: '按摩SPA',  icon: '🧖' },
-  ],
-  保险: [
-    { name: '社保医保', icon: '🏥' },
-    { name: '商业保险', icon: '📋' },
-  ],
-};
+import {
+  SYSTEM_CATEGORIES,
+  SYSTEM_SUBCATEGORIES,
+  L1_RENAMES,
+  buildCanonicalKeys,
+  catKey,
+  parseCatKey,
+  resolveLegacyTarget,
+  BillCatType,
+} from './system-categories';
+import { resolveMergeGuard } from './category-merge';
 
 // 把数据库行处理为前端要的形状
 function shapeCategory(c: any) {
@@ -202,27 +38,87 @@ function shapeCategory(c: any) {
 
 @Injectable()
 export class CategoriesService implements OnModuleInit {
+  private readonly logger = new Logger('Categories');
+
   constructor(private prisma: PrismaService) {}
 
   async onModuleInit() {
     await this.ensureSystemCategories();
   }
 
-  /** 确保系统分类存在（幂等：缺失时才补种） */
+  /**
+   * 确保系统分类与定稿种子一致，并幂等迁移旧系统分类上的业务引用。
+   * 用户自建分类（isSystem=false）不动。
+   */
   private async ensureSystemCategories() {
-    // 1. 一级分类种子
-    const count = await this.prisma.category.count({
-      where: { isSystem: true, parentId: null },
-    });
-    if (count === 0) {
-      await this.prisma.category.createMany({
-        data: SYSTEM_CATEGORIES.map((c) => ({ ...c, isSystem: true }) as any),
+    await this.seedSystemCategories();
+    await this.migrateLegacySystemCategories();
+  }
+
+  /** 补种 / 一级就地改名 / 补二级 */
+  private async seedSystemCategories() {
+    // 1. 一级：改名优先，否则按名创建
+    for (const seed of SYSTEM_CATEGORIES) {
+      const existing = await this.prisma.category.findFirst({
+        where: { isSystem: true, parentId: null, name: seed.name, type: seed.type as any },
       });
+      if (existing) {
+        // 图标/颜色漂移时轻轻对齐（不改 name）
+        if (existing.icon !== seed.icon || existing.color !== seed.color) {
+          await this.prisma.category.update({
+            where: { id: existing.id },
+            data: { icon: seed.icon, color: seed.color },
+          });
+        }
+        continue;
+      }
+
+      // 旧名就地改名（保留 id → 账单不用迁）
+      const oldName = Object.entries(L1_RENAMES).find(
+        ([, neu]) => neu === seed.name,
+      )?.[0];
+      if (oldName) {
+        const oldRow = await this.prisma.category.findFirst({
+          where: {
+            isSystem: true,
+            parentId: null,
+            name: oldName,
+            type: seed.type as any,
+          },
+        });
+        if (oldRow) {
+          await this.prisma.category.update({
+            where: { id: oldRow.id },
+            data: {
+              name: seed.name,
+              icon: seed.icon,
+              color: seed.color,
+            },
+          });
+          this.logger.log(`系统一级改名：${oldName} → ${seed.name}`);
+          continue;
+        }
+      }
+
+      await this.prisma.category.create({
+        data: {
+          name: seed.name,
+          type: seed.type as any,
+          icon: seed.icon,
+          color: seed.color,
+          isSystem: true,
+        },
+      });
+      this.logger.log(`补种系统一级：${seed.name}`);
     }
 
-    // 2. 二级分类种子（按 parent name 找 parent id，幂等：name+parentId 已存在就跳过）
+    // 2. 二级：按父名挂接，缺则建
     const parents = await this.prisma.category.findMany({
-      where: { isSystem: true, parentId: null, name: { in: Object.keys(SYSTEM_SUBCATEGORIES) } },
+      where: {
+        isSystem: true,
+        parentId: null,
+        name: { in: Object.keys(SYSTEM_SUBCATEGORIES) },
+      },
     });
     const parentByName = new Map(parents.map((p) => [p.name, p]));
 
@@ -246,23 +142,183 @@ export class CategoriesService implements OnModuleInit {
         }));
       if (toCreate.length) {
         await this.prisma.category.createMany({ data: toCreate as any });
+        this.logger.log(
+          `补种系统二级「${parentName}」：${toCreate.map((c) => c.name).join('、')}`,
+        );
       }
     }
   }
 
-  /** 返回 系统分类 + 当前账本自建分类（含 parent 信息）
-   *
-   *  自愈（self-healing）：每次查询时检查系统一级分类是否存在，
-   *  若缺失则自动补种（应对数据库被 reset 但服务未重启的情况）。
-   *
-   *  排序优先级：
-   *   1. parentId 升序（一级在前、子分类按父分组）
-   *   2. 系统分类在前、用户自建在后（同一父下也是）
-   *   3. 名字以"其他"开头的项 永远排到所在组的最后
-   *   4. createdAt 升序
+  /**
+   * 把不在新种子中的旧系统分类上的引用改挂到目标，再删空壳分类。
+   * 可重复执行：无旧分类时立刻返回。
    */
+  private async migrateLegacySystemCategories() {
+    const canonical = buildCanonicalKeys();
+    const allSystem = await this.prisma.category.findMany({
+      where: { isSystem: true },
+      include: { parent: { select: { name: true } } },
+    });
+
+    // id → key / key → id（新树）
+    const keyOf = (c: (typeof allSystem)[0]) =>
+      catKey(c.type as BillCatType, c.parent?.name ?? null, c.name);
+
+    const idByKey = new Map<string, string>();
+    for (const c of allSystem) {
+      const k = keyOf(c);
+      if (canonical.has(k)) idByKey.set(k, c.id);
+    }
+
+    // 种子刚补完时 allSystem 可能缺新行——再拉一次目标 id
+    const ensureTargetId = async (targetKey: string): Promise<string | null> => {
+      const hit = idByKey.get(targetKey);
+      if (hit) return hit;
+      const { type, parentName, name } = parseCatKey(targetKey);
+      let parentId: string | null = null;
+      if (parentName) {
+        const parent = await this.prisma.category.findFirst({
+          where: {
+            isSystem: true,
+            parentId: null,
+            name: parentName,
+            type: type as any,
+          },
+        });
+        if (!parent) return null;
+        parentId = parent.id;
+      }
+      const row = await this.prisma.category.findFirst({
+        where: {
+          isSystem: true,
+          parentId,
+          name,
+          type: type as any,
+        },
+      });
+      if (row) {
+        idByKey.set(targetKey, row.id);
+        return row.id;
+      }
+      return null;
+    };
+
+    const legacy = allSystem.filter((c) => !canonical.has(keyOf(c)));
+    if (legacy.length === 0) return;
+
+    let moved = 0;
+    // 先迁二级再迁一级，减少「父被删子还在」窗口
+    legacy.sort((a, b) => {
+      const ap = a.parentId ? 0 : 1;
+      const bp = b.parentId ? 0 : 1;
+      return ap - bp;
+    });
+
+    for (const old of legacy) {
+      const oldKey = keyOf(old);
+      const targetKey = resolveLegacyTarget(
+        old.type as BillCatType,
+        old.parent?.name ?? null,
+        old.name,
+        canonical,
+      );
+      const toId = await ensureTargetId(targetKey);
+      if (!toId) {
+        this.logger.warn(`迁移跳过：找不到目标 ${targetKey}（来自 ${oldKey}）`);
+        continue;
+      }
+      if (toId === old.id) continue;
+
+      await this.repointCategoryRefs(old.id, toId);
+      moved++;
+    }
+
+    // 删除已无引用的废弃系统分类（先子后父）
+    const leftovers = await this.prisma.category.findMany({
+      where: { isSystem: true },
+      include: { parent: { select: { name: true } } },
+    });
+    const toDelete = leftovers
+      .filter((c) => !canonical.has(keyOf(c)))
+      .sort((a, b) => {
+        const ap = a.parentId ? 0 : 1;
+        const bp = b.parentId ? 0 : 1;
+        return ap - bp;
+      });
+
+    let deleted = 0;
+    for (const c of toDelete) {
+      const refs = await this.countCategoryRefs(c.id);
+      if (refs > 0) {
+        this.logger.warn(
+          `废弃分类「${c.name}」仍有 ${refs} 处引用，暂不删除`,
+        );
+        continue;
+      }
+      // 若还有子分类挂着，跳过（下一轮或子删后再删）
+      const childCount = await this.prisma.category.count({
+        where: { parentId: c.id },
+      });
+      if (childCount > 0) continue;
+
+      await this.prisma.categorySort.deleteMany({ where: { categoryId: c.id } });
+      await this.prisma.category.delete({ where: { id: c.id } });
+      deleted++;
+    }
+
+    if (moved || deleted) {
+      this.logger.log(
+        `系统分类迁移完成：重挂 ${moved} 个，删除废弃 ${deleted} 个`,
+      );
+    }
+  }
+
+  private async countCategoryRefs(categoryId: string): Promise<number> {
+    const [bills, budgets, recurring, corrections, aiCorr, accounts] =
+      await Promise.all([
+        this.prisma.bill.count({ where: { categoryId } }),
+        this.prisma.budget.count({ where: { categoryId } }),
+        this.prisma.recurringBill.count({ where: { categoryId } }),
+        this.prisma.categoryCorrection.count({ where: { categoryId } }),
+        this.prisma.aiCorrection.count({ where: { categoryId } }),
+        this.prisma.account.count({ where: { autoDepositCategoryId: categoryId } }),
+      ]);
+    return bills + budgets + recurring + corrections + aiCorr + accounts;
+  }
+
+  /** 把所有指向 fromId 的业务 FK 改到 toId */
+  private async repointCategoryRefs(fromId: string, toId: string) {
+    await this.prisma.$transaction([
+      this.prisma.bill.updateMany({
+        where: { categoryId: fromId },
+        data: { categoryId: toId },
+      }),
+      this.prisma.budget.updateMany({
+        where: { categoryId: fromId },
+        data: { categoryId: toId },
+      }),
+      this.prisma.recurringBill.updateMany({
+        where: { categoryId: fromId },
+        data: { categoryId: toId },
+      }),
+      this.prisma.categoryCorrection.updateMany({
+        where: { categoryId: fromId },
+        data: { categoryId: toId },
+      }),
+      this.prisma.aiCorrection.updateMany({
+        where: { categoryId: fromId },
+        data: { categoryId: toId },
+      }),
+      this.prisma.account.updateMany({
+        where: { autoDepositCategoryId: fromId },
+        data: { autoDepositCategoryId: toId },
+      }),
+      this.prisma.categorySort.deleteMany({ where: { categoryId: fromId } }),
+    ]);
+  }
+
+  /** 返回 系统分类 + 当前账本自建分类（含 parent 信息） */
   async findAll(ledgerId: string) {
-    // 自愈：若系统分类意外缺失（如 DB reset 后未重启），自动补种
     await this.ensureSystemCategories();
 
     const categories = await this.prisma.category.findMany({
@@ -270,7 +326,6 @@ export class CategoriesService implements OnModuleInit {
       include: { parent: { select: { name: true, icon: true } } },
     });
 
-    // 本账本的自定义排序覆盖（sortOrder 越小越靠前）
     const sorts = await this.prisma.categorySort.findMany({
       where: { ledgerId },
       select: { categoryId: true, sortOrder: true },
@@ -280,8 +335,12 @@ export class CategoriesService implements OnModuleInit {
     const isOther = (name: string) =>
       typeof name === 'string' && name.startsWith('其他');
 
+    // 一级展示顺序：跟种子数组一致
+    const l1Order = new Map(
+      SYSTEM_CATEGORIES.map((c, i) => [c.name, i] as const),
+    );
+
     categories.sort((a, b) => {
-      // 一级在前，否则按 parentId 分组
       const aPid = a.parentId ?? '';
       const bPid = b.parentId ?? '';
       if (aPid !== bPid) {
@@ -289,20 +348,22 @@ export class CategoriesService implements OnModuleInit {
         if (bPid === '') return 1;
         return aPid.localeCompare(bPid);
       }
-      // 组内：自定义排序优先，覆盖以下所有默认规则
       const ao = orderMap.get(a.id);
       const bo = orderMap.get(b.id);
       if (ao != null || bo != null) {
         if (ao != null && bo != null) return ao - bo;
         return ao != null ? -1 : 1;
       }
-      // "其他…" 排到所在组最后
+      // 一级：按种子顺序
+      if (!a.parentId && !b.parentId) {
+        const ai = l1Order.get(a.name) ?? 999;
+        const bi = l1Order.get(b.name) ?? 999;
+        if (ai !== bi) return ai - bi;
+      }
       const aOther = isOther(a.name);
       const bOther = isOther(b.name);
       if (aOther !== bOther) return aOther ? 1 : -1;
-      // 系统分类在前
       if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1;
-      // 否则按创建时间
       return a.createdAt.getTime() - b.createdAt.getTime();
     });
 
@@ -310,7 +371,6 @@ export class CategoriesService implements OnModuleInit {
   }
 
   async create(ledgerId: string, userId: string, dto: CreateCategoryDto) {
-    // 如果带 parentId，校验 parent 存在且 type 一致
     if (dto.parentId) {
       const parent = await this.prisma.category.findFirst({
         where: { id: dto.parentId },
@@ -364,15 +424,70 @@ export class CategoriesService implements OnModuleInit {
     if (category.ledgerId !== ledgerId)
       throw new ForbiddenException('无权操作');
 
+    const refs = await this.countCategoryRefs(id);
+    if (refs > 0) {
+      throw new BadRequestException(
+        '仍有账单/预算等使用该分类，请先「合并到」其他分类后再删除',
+      );
+    }
+    const childCount = await this.prisma.category.count({
+      where: { parentId: id },
+    });
+    if (childCount > 0) {
+      throw new BadRequestException('请先删除或合并二级分类');
+    }
+
     await this.prisma.category.delete({ where: { id } });
-    // 顺手清掉它的排序覆盖记录（避免残留）
     await this.prisma.categorySort
       .deleteMany({ where: { categoryId: id } })
       .catch(() => {});
     return { message: '删除成功' };
   }
 
-  /** 保存某同级分组的自定义排序：orderedIds 按展示顺序排好，逐个写入 sortOrder=index */
+  /**
+   * 合并自建分类 → 目标分类：改挂全部业务引用后删除源。
+   * 目标可以是系统分类或本账本自建；类型必须一致。
+   */
+  async merge(ledgerId: string, sourceId: string, targetId: string) {
+    const [source, target, sourceChildCount] = await Promise.all([
+      this.prisma.category.findFirst({ where: { id: sourceId } }),
+      this.prisma.category.findFirst({ where: { id: targetId } }),
+      this.prisma.category.count({ where: { parentId: sourceId } }),
+    ]);
+
+    const err = resolveMergeGuard({
+      sourceId,
+      targetId,
+      source,
+      target,
+      sourceChildCount,
+      targetIsDescendantOfSource: !!(
+        target?.parentId && target.parentId === sourceId
+      ),
+      ledgerId,
+    });
+    if (err) {
+      if (err.includes('不存在')) throw new NotFoundException(err);
+      if (err.includes('无权') || err.includes('系统分类'))
+        throw new ForbiddenException(err);
+      throw new BadRequestException(err);
+    }
+
+    const moved = await this.countCategoryRefs(sourceId);
+    await this.repointCategoryRefs(sourceId, targetId);
+    await this.prisma.category.delete({ where: { id: sourceId } });
+
+    this.logger.log(
+      `合并分类「${source!.name}」→「${target!.name}」，改挂 ${moved} 处引用`,
+    );
+    return {
+      message: '合并成功',
+      moved,
+      sourceName: source!.name,
+      targetName: target!.name,
+    };
+  }
+
   async reorder(ledgerId: string, orderedIds: string[]) {
     const ids = (orderedIds ?? []).filter((x) => typeof x === 'string');
     if (ids.length === 0) return { message: '无变化' };

@@ -15,6 +15,7 @@ import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { BriefingEnabledDto } from './dto/briefing-enabled.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { RecoverStartDto } from './dto/recover-start.dto';
 import { RecoverFinishDto } from './dto/recover-finish.dto';
@@ -51,6 +52,13 @@ export class AuthController {
   @Patch('me')
   updateMe(@Req() req: any, @Body() dto: UpdateProfileDto) {
     return this.authService.updateProfile(req.user.id, dto);
+  }
+
+  // 每周管家简报开关
+  @UseGuards(AuthGuard('jwt'))
+  @Patch('me/briefing-enabled')
+  setBriefingEnabled(@Req() req: any, @Body() dto: BriefingEnabledDto) {
+    return this.authService.setBriefingEnabled(req.user.id, dto.enabled);
   }
 
   // 修改密码：登录态；客户端已经用新密码 KDF 重新加密了 privKey

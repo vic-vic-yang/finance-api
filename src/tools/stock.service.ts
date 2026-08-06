@@ -2,6 +2,11 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { LlmRegistry } from '../ai/llm/llm-registry';
 import { ResolvedLlm } from '../ai/llm/llm-resolver';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  hasChineseText,
+  parseEastmoneyChineseName,
+  toEastmoneySecid,
+} from './stock-name';
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
@@ -421,16 +426,6 @@ export class StockService {
   }
 
   // ── A股/港股：东方财富按个股新闻流（中文，比 Yahoo 相关得多）──────
-  /** Yahoo 代码 → 东方财富 secid（上交所 1.、深交所 0.、港股 116.）；美股返回 null */
-  private toEastmoneySecid(symbol: string): string | null {
-    const up = symbol.toUpperCase();
-    const code = up.replace(/\.(SS|SZ|HK)$/, '');
-    if (up.endsWith('.SS')) return '1.' + code;
-    if (up.endsWith('.SZ')) return '0.' + code;
-    if (up.endsWith('.HK')) return '116.' + code.padStart(5, '0');
-    return null;
-  }
-
   private async fetchEastmoneyNews(secid: string): Promise<any[]> {
     try {
       const u = `https://np-listapi.eastmoney.com/comm/web/getListInfo?client=web&biz=web_news&mTypeAndCode=${secid}&type=1&pageindex=1&pagesize=14&_=1`;
@@ -469,7 +464,7 @@ export class StockService {
 
   /** 取公司新闻：A股/港股用东方财富(中文)，美股/其他用 Yahoo(按公司名) */
   private async getCompanyNews(quote: any): Promise<any[]> {
-    const secid = this.toEastmoneySecid(quote.symbol);
+    const secid = toEastmoneySecid(quote.symbol);
     if (secid) {
       const em = await this.fetchEastmoneyNews(secid);
       if (em.length) return em;
@@ -530,6 +525,119 @@ export class StockService {
     }
   }
 
+  // ── 中文证券名 ────────────────────────────────────────────
+  /** A股/港股从东方财富取官方中文简称，不依赖新闻或 LLM。 */
+  private async fetchEastmoneyChineseName(
+    symbol: string,
+  ): Promise<string | null> {
+    const secid = toEastmoneySecid(symbol);
+    if (!secid) return null;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 6000);
+      const r = await fetch(
+        `https://push2.eastmoney.com/api/qt/stock/get?secid=${encodeURIComponent(secid)}&fields=f58`,
+        {
+          signal: ctrl.signal,
+          headers: {
+            'User-Agent': UA,
+            Referer: 'https://quote.eastmoney.com/',
+          },
+        },
+      );
+      clearTimeout(timer);
+      if (!r.ok) return null;
+      return parseEastmoneyChineseName(await r.json());
+    } catch (e) {
+      this.logger.warn(
+        `取中文证券名失败（${symbol}）：${(e as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  /** 复用同一用户该代码旧快照里已有的中文名。 */
+  private async findSavedChineseName(
+    userId: string,
+    symbol: string,
+  ): Promise<string | null> {
+    const row = await this.prisma.stockAnalysis.findFirst({
+      where: {
+        userId,
+        symbol: symbol.toUpperCase(),
+        nameZh: { not: null },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { nameZh: true },
+    });
+    const name = String(row?.nameZh ?? '').trim();
+    return name && hasChineseText(name) ? name.slice(0, 40) : null;
+  }
+
+  /** 美股等无中文行情源时，用当前请求的 BYOK 模型或服务端默认模型翻译。 */
+  private async translateChineseName(
+    name: string,
+    symbol: string,
+    llm?: ResolvedLlm,
+  ): Promise<string | null> {
+    const modelName = llm?.name ?? this.llms.defaultTextModelName();
+    if (!modelName) return null;
+    try {
+      const res = await (llm?.model ?? this.llms.get(modelName)).chat(
+        [
+          {
+            role: 'system',
+            content:
+              '你是证券名称助手。给定股票代码和英文名称，返回该证券在中文市场最常用的简称；' +
+              '优先使用公认译名，不附带代码、交易所或解释。只返回 JSON：{"nameZh":""}。',
+          },
+          { role: 'user', content: `${symbol}\n${name}` },
+        ],
+        { responseFormat: 'json_object', temperature: 0, maxTokens: 300 },
+      );
+      const parsed = parseJsonLoose(res.content || '') || {};
+      const translated = String(parsed.nameZh || '').trim().slice(0, 40);
+      return translated && hasChineseText(translated) ? translated : null;
+    } catch (e) {
+      this.logger.warn(
+        `翻译中文证券名失败（${symbol}）：${(e as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  private async resolveChineseName(
+    userId: string,
+    symbol: string,
+    name: string,
+    llm?: ResolvedLlm,
+    allowLlm = true,
+  ): Promise<string | null> {
+    if (hasChineseText(name)) return name.slice(0, 40);
+    return (
+      (await this.fetchEastmoneyChineseName(symbol)) ??
+      (await this.findSavedChineseName(userId, symbol)) ??
+      (allowLlm
+        ? await this.translateChineseName(name, symbol, llm)
+        : null)
+    );
+  }
+
+  private async saveResolvedChineseName(
+    userId: string,
+    symbol: string,
+    nameZh: string,
+  ): Promise<void> {
+    await this.prisma.stockAnalysis.updateMany({
+      where: {
+        userId,
+        symbol: symbol.toUpperCase(),
+        nameZh: null,
+      },
+      data: { nameZh },
+    });
+  }
+
   // ── 对外入口 ──────────────────────────────────────────────
   /**
    * 查询/更新某只股票：取最新行情+新闻，结合该用户上次快照做对比分析，存一条快照。
@@ -553,6 +661,12 @@ export class StockService {
 
     // 行情（含公司名）。已聚焦「记账/持仓」，不再做 AI 选股分析与资讯。
     const quote = await this.fetchQuote(resolved.symbol);
+    quote.nameZh = await this.resolveChineseName(
+      userId,
+      symbol,
+      quote.name,
+      llm,
+    );
     const holding = await this.getHolding(userId, symbol);
 
     // 存快照（仅名称 + 行情，供持仓列表取名/最新价用）+ 修剪历史
@@ -566,6 +680,9 @@ export class StockService {
       },
       select: { createdAt: true },
     });
+    if (quote.nameZh) {
+      await this.saveResolvedChineseName(userId, symbol, quote.nameZh);
+    }
     await this.pruneHistory(userId, symbol);
 
     return {
@@ -819,10 +936,22 @@ export class StockService {
         const q = (r.quote as any) || {};
         const live = await this.fetchLivePrice(r.symbol).catch(() => null);
         const h = hmap.get(r.symbol.toUpperCase());
+        const nameZh =
+          r.nameZh ||
+          (await this.resolveChineseName(
+            userId,
+            r.symbol,
+            r.name || q.name || r.symbol,
+            undefined,
+            false,
+          ));
+        if (nameZh && !r.nameZh) {
+          await this.saveResolvedChineseName(userId, r.symbol, nameZh);
+        }
         return {
           symbol: r.symbol,
           name: r.name,
-          nameZh: r.nameZh,
+          nameZh,
           currency: live?.currency || q.currency || '',
           price: live?.price ?? q.price ?? null,
           change: live?.change ?? q.change ?? null,
@@ -849,7 +978,7 @@ export class StockService {
   }
 
   /** 详情：某股票最新保存的完整快照 + 历史(价格/PE/时间) */
-  async getSaved(userId: string, symbol: string) {
+  async getSaved(userId: string, symbol: string): Promise<any> {
     const sym = symbol.toUpperCase();
     const rows = await this.prisma.stockAnalysis.findMany({
       where: { userId, symbol: sym },
@@ -858,6 +987,23 @@ export class StockService {
     });
     if (!rows.length) throw new NotFoundException('没有该股票的记录');
     const latest = rows[0];
+    const quote = { ...((latest.quote as any) || {}) };
+    const nameZh =
+      latest.nameZh ||
+      quote.nameZh ||
+      (await this.resolveChineseName(
+        userId,
+        sym,
+        latest.name || quote.name || sym,
+        undefined,
+        false,
+      ));
+    if (nameZh) {
+      quote.nameZh = nameZh;
+      if (!latest.nameZh) {
+        await this.saveResolvedChineseName(userId, sym, nameZh);
+      }
+    }
     const history = rows
       .map((r) => ({
         price: (r.quote as any)?.price ?? null,
@@ -881,7 +1027,7 @@ export class StockService {
       this.getHolding(userId, sym),
     ]);
     return {
-      quote: latest.quote,
+      quote,
       analysis,
       news: latest.news || [],
       updatedAt: latest.createdAt.toISOString(),

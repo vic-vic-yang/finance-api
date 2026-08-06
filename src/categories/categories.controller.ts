@@ -6,6 +6,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { MergeCategoryDto } from './dto/merge-category.dto';
 
 @Controller('categories')
 @UseGuards(AuthGuard('jwt'))
@@ -33,6 +34,20 @@ export class CategoriesController {
     return this.categoriesService.reorder(
       req.user.currentLedgerId,
       body?.orderedIds ?? [],
+    );
+  }
+
+  /** 合并自建分类到目标（改挂账单等引用后删除源） */
+  @Post(':id/merge')
+  merge(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: MergeCategoryDto,
+  ) {
+    return this.categoriesService.merge(
+      req.user.currentLedgerId,
+      id,
+      dto.targetId,
     );
   }
 

@@ -9,7 +9,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateLedgerDto } from './dto/create-ledger.dto';
 import { UpdateLedgerDto } from './dto/update-ledger.dto';
 import { JoinLedgerDto } from './dto/join-ledger.dto';
-import { randomInt } from 'crypto';
+import { ImportBackupDto } from './dto/import-backup.dto';
+import { remapBackup, BackupPayload } from './backup-remap';
+import { randomInt, randomUUID } from 'crypto';
 
 @Injectable()
 export class LedgersService {
@@ -217,6 +219,143 @@ export class LedgersService {
       message: `已加入「${invite.ledger.name}」，等待原成员授权解密`,
       ledger: invite.ledger,
       pending: true,
+    };
+  }
+
+  /** 加密备份批量恢复：创建新账本 + 全实体 id 重映射导入（单事务原子）。
+   *  隐私不变式：cipher 字段保持密文原样搬运（客户端已用新 DEK 重加密），
+   *  服务端只改 id / 外键 / 归属，绝不接触明文。
+   *
+   *  为什么必须随请求带 dekWrapped 而不是事后走 attachDek：
+   *  恢复出的账本只有 owner 一个成员，而 attachDek 要求调用者已持有 DEK
+   *  （self.dekWrapped 非空），「自己给自己授权」会被拒 → 死锁。
+   *  因此这里在同事务内把「新 DEK 用恢复者公钥包装」直接写入成员行。 */
+  async importBackup(userId: string, dto: ImportBackupDto) {
+    // 现有系统分类（全局共享）：恢复时按 (type, parentName, name) 复用，
+    // 让恢复出的账单继续指向真正的系统分类，而不是重建一套自定义副本。
+    const sysCats = await this.prisma.category.findMany({
+      where: { isSystem: true },
+      include: { parent: { select: { name: true } } },
+    });
+    const systemCategories = sysCats.map((c) => ({
+      id: c.id,
+      name: c.name,
+      type: c.type as string,
+      parentName: c.parent?.name ?? null,
+    }));
+
+    const ledgerId = randomUUID();
+    const remapped = remapBackup(
+      {
+        categories: dto.categories,
+        accounts: dto.accounts,
+        bills: dto.bills,
+        budgets: dto.budgets,
+        goals: dto.goals,
+        loans: dto.loans,
+        recurring: dto.recurring,
+      } as unknown as BackupPayload,
+      {
+        userId,
+        ledgerId,
+        newId: () => randomUUID(),
+        now: new Date().toISOString(),
+        systemCategories,
+      },
+    );
+
+    const dekBuf = Buffer.from(dto.dekWrapped, 'base64');
+
+    try {
+      await this.prisma.$transaction(
+        async (tx) => {
+          await tx.ledger.create({
+            data: {
+              id: ledgerId,
+              name: dto.name,
+              icon: dto.icon ?? '📒',
+              ownerId: userId,
+              isPersonal: false,
+            },
+          });
+          await tx.ledgerMember.create({
+            data: {
+              ledgerId,
+              userId,
+              role: 'owner',
+              dekWrapped: dekBuf,
+              dekVersion: 1,
+            },
+          });
+          if (remapped.categories.length) {
+            await tx.category.createMany({ data: remapped.categories as never });
+          }
+          if (remapped.accounts.length) {
+            await tx.account.createMany({
+              data: remapped.accounts.map((a) => ({
+                ...a,
+                nameCipher: Buffer.from(a.nameCipher as string, 'base64'),
+              })) as never,
+            });
+          }
+          if (remapped.budgets.length) {
+            await tx.budget.createMany({ data: remapped.budgets as never });
+          }
+          if (remapped.bills.length) {
+            await tx.bill.createMany({
+              data: remapped.bills.map((b) => ({
+                ...b,
+                noteCipher: Buffer.from(b.noteCipher as string, 'base64'),
+              })) as never,
+            });
+          }
+          if (remapped.goals.length) {
+            await tx.savingsGoal.createMany({
+              data: remapped.goals.map((g) => ({
+                ...g,
+                nameCipher: Buffer.from(g.nameCipher as string, 'base64'),
+              })) as never,
+            });
+          }
+          if (remapped.loans.length) {
+            await tx.loan.createMany({ data: remapped.loans as never });
+          }
+          if (remapped.recurring.length) {
+            await tx.recurringBill.createMany({
+              data: remapped.recurring.map((r) => ({
+                ...r,
+                noteCipher: r.noteCipher
+                  ? Buffer.from(r.noteCipher as string, 'base64')
+                  : null,
+              })) as never,
+            });
+          }
+        },
+        // 大批量恢复（数万行）单事务耗时较长，放宽交互事务超时
+        { timeout: 120_000, maxWait: 15_000 },
+      );
+    } catch (e) {
+      // 事务已整体回滚，不会留下半个账本；把原因透给客户端提示
+      const msg = (e as Error).message ?? '未知错误';
+      throw new BadRequestException(
+        `恢复失败，未写入任何数据：${msg.slice(0, 200)}`,
+      );
+    }
+
+    const s = remapped.stats;
+    return {
+      message: '恢复成功',
+      ledger: { id: ledgerId, name: dto.name, icon: dto.icon ?? '📒' },
+      counts: {
+        categories: remapped.categories.length + s.systemCategoriesMatched,
+        accounts: remapped.accounts.length,
+        bills: remapped.bills.length,
+        budgets: remapped.budgets.length,
+        goals: remapped.goals.length,
+        loans: remapped.loans.length,
+        recurring: remapped.recurring.length,
+      },
+      stats: s,
     };
   }
 

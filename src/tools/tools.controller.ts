@@ -69,7 +69,7 @@ export class ToolsController {
 
   /** GET /api/tools/stocks/:symbol —— 某股票保存的完整分析 + 历史 */
   @Get('stocks/:symbol')
-  stockSaved(@Request() req, @Param('symbol') symbol: string) {
+  stockSaved(@Request() req, @Param('symbol') symbol: string): Promise<any> {
     return this.stock.getSaved(req.user.id, symbol);
   }
 

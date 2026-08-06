@@ -11,6 +11,7 @@ import {
   ToolCall,
   ToolSpec,
 } from './llm/chat-model';
+import { buildDigestSlices, buildKnowledgeText } from './knowledge-digest';
 
 /** 客户端可渲染的数据卡片（金额 / 趋势 / 预算）*/
 export type ReplyCard =
@@ -120,8 +121,27 @@ export class ChatService {
     // 控历史长度
     const recentHist = history.slice(-ChatService.MAX_HISTORY_TURNS * 2);
 
+    // 财务知识库摘要：按用户消息关键词路由出相关切片（本月/上月收支、预算、
+    // 目标、借贷、账户），文本化后注入 system 上下文。只聚合明文字段，
+    // 摘要构建失败不阻断对话（降级为无摘要）。
+    let knowledge = '';
+    try {
+      const digestSlices = await buildDigestSlices(
+        this.prisma,
+        ledgerId,
+        userId,
+        new Date(),
+      );
+      knowledge = buildKnowledgeText(trimmed, digestSlices);
+    } catch (e: any) {
+      this.logger.warn(`knowledge digest 构建失败: ${e?.message}`);
+    }
+
     // 构造 messages
-    const sys: ChatMessage = { role: 'system', content: SYSTEM_PROMPT };
+    const sys: ChatMessage = {
+      role: 'system',
+      content: knowledge ? `${SYSTEM_PROMPT}\n\n${knowledge}` : SYSTEM_PROMPT,
+    };
     const messages: ChatMessage[] = [
       sys,
       ...recentHist.map((t) => ({ role: t.role, content: t.content }) as ChatMessage),
@@ -858,6 +878,7 @@ const SYSTEM_PROMPT = `你是「司库」app 内的财务助手。用户用中�
 10. 调预算前若分类/金额不清楚，先追问，不要乱猜。
 11. 用户要"改某笔的分类"时，先用 findBills（按金额/日期）定位；若命中多笔，列出来让用户说清是哪笔，再用 recategorizeBill。
 12. 用户说"记一笔/我花了X买了Y"时用 recordBill，把金额/分类/备注抽出来；它只生成待确认草稿卡，不是立即记账；账户不清楚就别填（留空，客户端用默认账户）。
+13. 上下文中若附带「用户账本的真实数据摘要」，优先基于摘要直接回答（它已按你的问题路由出相关切片）；摘要没覆盖到的细节再调工具查询，不要重复调工具拿摘要里已有的数字。
 
 记住：你看不到任何账单备注的明文（端到端加密），所以涉及商户分析时一定要走 groupBy=merchant 让客户端帮你聚合。`;
 

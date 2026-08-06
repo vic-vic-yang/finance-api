@@ -16,6 +16,7 @@ import { LedgersService } from './ledgers.service';
 import { CreateLedgerDto } from './dto/create-ledger.dto';
 import { UpdateLedgerDto } from './dto/update-ledger.dto';
 import { JoinLedgerDto } from './dto/join-ledger.dto';
+import { ImportBackupDto } from './dto/import-backup.dto';
 
 @Controller('ledgers')
 @UseGuards(AuthGuard('jwt'))
@@ -59,6 +60,13 @@ export class LedgersController {
   @HttpCode(HttpStatus.OK)
   join(@Request() req, @Body() dto: JoinLedgerDto) {
     return this.ledgers.join(req.user.id, dto);
+  }
+
+  /** 加密备份批量恢复：新账本 + 全实体导入（cipher 字段密文原样搬运） */
+  @Post('import-backup')
+  @HttpCode(HttpStatus.CREATED)
+  importBackup(@Request() req, @Body() dto: ImportBackupDto) {
+    return this.ledgers.importBackup(req.user.id, dto);
   }
 
   @Get(':id/members')

@@ -1,11 +1,15 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.setGlobalPrefix('api');
+
+  // 备份恢复（import-backup）单请求可能携带数万行实体（密文），默认 100kb 不够
+  app.useBodyParser('json', { limit: '50mb' });
 
   // CORS：从 .env 的 CORS_ORIGINS 读取允许列表（逗号分隔）
   // 另外：任何 http://localhost:* 和 http://127.0.0.1:* 自动放行（本地调试 Flutter web 端口随机）

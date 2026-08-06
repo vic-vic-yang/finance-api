@@ -1,8 +1,20 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BudgetsService } from '../budgets/budgets.service';
 import { GoalsService } from '../goals/goals.service';
+import { LedgersService } from '../ledgers/ledgers.service';
+import {
+  AUTO_EXECUTABLE_ACTIONS,
+  AUTO_EXECUTE_DAILY_LIMIT,
+  canAutoExecute,
+  isAutoExecutableAction,
+} from './auto-execute';
 import { DetectorInput, DetectorBill, ProposalDraft } from './detectors/types';
 import { detectRecategorizeOther } from './detectors/recategorize-other';
 import { detectLargeExpense } from './detectors/large-expense';
@@ -20,20 +32,54 @@ const DETECTORS = [
 
 @Injectable()
 export class CfoService {
+  private readonly logger = new Logger(CfoService.name);
+
   constructor(
     private prisma: PrismaService,
     private budgets: BudgetsService,
     private goals: GoalsService,
+    private ledgers: LedgersService,
   ) {}
 
-  /** GET /cfo/proposals —— 惰性生成 + 返回 pending */
+  /** GET /cfo/proposals —— 惰性生成 + 自动执行 sweep + 返回 pending（含今日已自动执行的留痕） */
   async listAndGenerate(ledgerId: string, userId: string) {
+    await this.generateNewProposals(ledgerId, userId);
+    await this.sweepAutoExecute(ledgerId);
+
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+
+    const [pending, autoDone] = await Promise.all([
+      this.prisma.proposal.findMany({
+        where: { ledgerId, status: 'pending', type: { not: 'chat_action' } },
+        orderBy: [{ severity: 'desc' }, { createdAt: 'desc' }],
+      }),
+      // 今日被自动执行的提议一并返回（status=done + autoExecuted 标记），
+      // 让客户端能展示「已自动执行」留痕，而不是悄无声息地消失。
+      this.prisma.proposal.findMany({
+        where: {
+          ledgerId,
+          status: 'done',
+          decidedAt: { gte: dayStart },
+          evidenceRefs: { path: ['autoExecuted'], equals: true },
+        },
+        orderBy: { decidedAt: 'desc' },
+      }),
+    ]);
+    return [...autoDone, ...pending].map((p) => this.serialize(p));
+  }
+
+  /** 跑一遍全部检测器，把新发现的问题落成 Proposal。
+   *  返回本次**新建**的行（已存在的 dedupeKey / 被静音类型不返回）。
+   *  供 listAndGenerate 与通知中心的每日主动扫描复用。 */
+  async generateNewProposals(ledgerId: string, userId: string) {
     const input = await this.buildInput(ledgerId, userId);
     const muted = await this.mutedTypes(ledgerId, input.now);
 
     const drafts: ProposalDraft[] = [];
     for (const d of DETECTORS) drafts.push(...d(input));
 
+    const created = [];
     for (const draft of drafts) {
       if (muted.has(draft.type)) continue;
       // 按 dedupeKey 跳过任何已存在项(含已决定)
@@ -41,27 +87,24 @@ export class CfoService {
         where: { ledgerId_dedupeKey: { ledgerId, dedupeKey: draft.dedupeKey } },
       });
       if (exists) continue;
-      await this.prisma.proposal.create({
-        data: {
-          ledgerId,
-          type: draft.type,
-          severity: draft.severity,
-          title: draft.title,
-          body: draft.body,
-          actionKind: draft.actionKind,
-          actionParams: (draft.actionParams ?? undefined) as any,
-          requiresClient: draft.requiresClient,
-          evidenceRefs: (draft.evidenceRefs ?? undefined) as any,
-          dedupeKey: draft.dedupeKey,
-        },
-      });
+      created.push(
+        await this.prisma.proposal.create({
+          data: {
+            ledgerId,
+            type: draft.type,
+            severity: draft.severity,
+            title: draft.title,
+            body: draft.body,
+            actionKind: draft.actionKind,
+            actionParams: (draft.actionParams ?? undefined) as any,
+            requiresClient: draft.requiresClient,
+            evidenceRefs: (draft.evidenceRefs ?? undefined) as any,
+            dedupeKey: draft.dedupeKey,
+          },
+        }),
+      );
     }
-
-    const pending = await this.prisma.proposal.findMany({
-      where: { ledgerId, status: 'pending', type: { not: 'chat_action' } },
-      orderBy: [{ severity: 'desc' }, { createdAt: 'desc' }],
-    });
-    return pending.map((p) => this.serialize(p));
+    return created;
   }
 
   private async mutedTypes(ledgerId: string, now: Date): Promise<Set<string>> {
@@ -82,7 +125,9 @@ export class CfoService {
     actionKind: p.actionKind,
     actionParams: p.actionParams,
     requiresClient: p.requiresClient,
+    autoExecuted: (p.evidenceRefs as any)?.autoExecuted === true,
     createdAt: p.createdAt,
+    decidedAt: p.decidedAt ?? null,
   });
 
   /** 把明文数据查出来喂给 detector。绝不读取任何加密 note/name 字段。 */
@@ -185,6 +230,107 @@ export class CfoService {
       recentExpenseByAccount,
       lastOutflowDays,
     };
+  }
+
+  // ─── 主动式 CFO：自动执行规则 ─────────────────────────────
+
+  /** GET /cfo/auto-rules —— 返回各白名单动作类型的开关状态（未建记录视为 false） */
+  async listAutoRules(ledgerId: string, userId: string) {
+    await this.ledgers.ensureMembership(userId, ledgerId);
+    const rules = await this.prisma.cfoAutoRule.findMany({ where: { ledgerId } });
+    const byType = new Map(rules.map((r) => [r.actionType, r.enabled]));
+    return AUTO_EXECUTABLE_ACTIONS.map((actionType) => ({
+      actionType,
+      enabled: byType.get(actionType) ?? false,
+    }));
+  }
+
+  /** PUT /cfo/auto-rules/:actionType —— upsert 开关；高危动作直接 400 拒绝 */
+  async setAutoRule(
+    ledgerId: string,
+    userId: string,
+    actionType: string,
+    enabled: boolean,
+  ) {
+    await this.ledgers.ensureMembership(userId, ledgerId);
+    if (!isAutoExecutableAction(actionType)) {
+      throw new BadRequestException(
+        `动作 ${actionType} 属于高危操作，不允许自动执行`,
+      );
+    }
+    const rule = await this.prisma.cfoAutoRule.upsert({
+      where: { ledgerId_actionType: { ledgerId, actionType } },
+      create: { ledgerId, actionType, enabled },
+      update: { enabled },
+    });
+    return { actionType: rule.actionType, enabled: rule.enabled };
+  }
+
+  /** 自动执行 sweep：对每个 enabled 的规则，把匹配的 pending 提议走现有
+   *  execute 路径自动执行。安全约束：
+   *  - 门控纯函数 canAutoExecute（白名单 + pending + 非 requiresClient + 非 critical）；
+   *  - 每账本每天最多 AUTO_EXECUTE_DAILY_LIMIT 次；
+   *  - 每条留痕：status=done + decidedAt + evidenceRefs.autoExecuted=true；
+   *  - 单条失败捕获异常、记日志，不影响其它提议。
+   *  返回本次自动执行的条数（供调用方/日志用）。 */
+  async sweepAutoExecute(ledgerId: string): Promise<number> {
+    const rules = await this.prisma.cfoAutoRule.findMany({
+      where: { ledgerId, enabled: true },
+    });
+    if (rules.length === 0) return 0;
+
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const todayCount = await this.prisma.proposal.count({
+      where: {
+        ledgerId,
+        decidedAt: { gte: dayStart },
+        evidenceRefs: { path: ['autoExecuted'], equals: true },
+      },
+    });
+    let remaining = AUTO_EXECUTE_DAILY_LIMIT - todayCount;
+    if (remaining <= 0) return 0;
+
+    const enabledTypes = new Set(rules.map((r) => r.actionType));
+    const pendings = await this.prisma.proposal.findMany({
+      where: {
+        ledgerId,
+        status: 'pending',
+        requiresClient: false,
+        actionKind: { in: [...enabledTypes] },
+      },
+      orderBy: [{ createdAt: 'asc' }],
+    });
+
+    let executed = 0;
+    for (const p of pendings) {
+      if (remaining <= 0) break;
+      if (!p.actionKind || !canAutoExecute(p.actionKind, p)) continue;
+      try {
+        await this.execute(ledgerId, p);
+        await this.prisma.proposal.update({
+          where: { id: p.id },
+          data: {
+            status: 'done',
+            decidedAt: new Date(),
+            evidenceRefs: {
+              ...((p.evidenceRefs as object) ?? {}),
+              autoExecuted: true,
+              autoExecutedAt: new Date().toISOString(),
+            },
+          },
+        });
+        await this.bumpFeedback(ledgerId, p.type, 'approved');
+        executed++;
+        remaining--;
+        this.logger.log(`自动执行提议 ${p.id}（${p.actionKind}）成功`);
+      } catch (e: any) {
+        this.logger.warn(
+          `自动执行提议 ${p.id}（${p.actionKind}）失败：${e?.message}`,
+        );
+      }
+    }
+    return executed;
   }
 
   /** 对话动作：agent 在聊天里提议一个写操作 → 建一条待确认 Proposal，返回给聊天出卡 */

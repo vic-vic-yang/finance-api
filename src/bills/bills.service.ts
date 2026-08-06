@@ -41,6 +41,7 @@ export class BillsService {
     const {
       page = 1, limit = 20, type, categoryId, accountId, userId, startDate, endDate,
       minAmount, maxAmount, categoryIds, accountIds, userIds, isTransfer, source,
+      includeStock,
     } = query;
     const skip = (page - 1) * Number(limit);
 
@@ -53,10 +54,11 @@ export class BillsService {
       where.isTransfer = false;
     }
     // 来源过滤：显式指定（如 source='stock' 只看股票盈亏）；
-    // 按类型筛收支时自动排除股票纸面盈亏（与统计口径一致）
+    // 缺省一律排除股票纸面盈亏（未卖出不算真收支，与统计口径一致）；
+    // includeStock='true' 时保留（账户详情的余额轨迹需要看到每日结算）
     if (source) {
       where.source = source;
-    } else if (type) {
+    } else if (includeStock !== 'true') {
       where.source = { not: 'stock' };
     }
     // 分类筛选（多选优先）：一级分类自动带上其子分类（与预算/统计口径一致）
@@ -101,7 +103,7 @@ export class BillsService {
       }),
       this.prisma.bill.count({ where }),
       this.prisma.bill.aggregate({
-        // 转账账单与股票纸面盈亏不计入收支汇总（但仍出现在上面的账单列表里）
+        // 转账账单与股票纸面盈亏不计入收支汇总（列表默认也不显示股票纸面盈亏）
         where: {
           ...where,
           type: 'income',
