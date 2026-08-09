@@ -103,4 +103,20 @@ export class ToolsController {
       },
     );
   }
+
+  /**
+   * POST /api/tools/stocks/:symbol/close —— 全部平仓
+   * { closePrice, accountId? }
+   * 按平仓价相对成本计算总盈亏；有关联账户则记 stock_close 流水并停用持仓。
+   */
+  @Post('stocks/:symbol/close')
+  closeHolding(
+    @Request() req,
+    @Param('symbol') symbol: string,
+    @Body() body: { closePrice?: number; accountId?: string | null },
+  ) {
+    return this.holdings.closeHolding(req.user.id, symbol, body ?? {}, {
+      ledgerId: req.user.currentLedgerId ?? null,
+    });
+  }
 }

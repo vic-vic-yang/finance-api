@@ -253,10 +253,12 @@ export class BillsService {
       const existing = await tx.bill.findFirst({ where: { id, ledgerId } });
       if (!existing) throw new NotFoundException('账单不存在');
 
-      // 股票盈亏账单由每日收盘结算自动维护（且不参与余额冲正），只读
-      if (existing.source === 'stock') {
+      // 股票纸面盈亏 / 平仓盈亏由系统维护：纸面不参与余额冲正；平仓账单创建时也不改余额
+      if (existing.source === 'stock' || existing.source === 'stock_close') {
         throw new BadRequestException(
-          '股票盈亏由每日结算自动维护，不可修改；如需调整请改持仓或等下次结算',
+          existing.source === 'stock_close'
+            ? '平仓盈亏由系统记账，不可修改'
+            : '股票盈亏由每日结算自动维护，不可修改；如需调整请改持仓或等下次结算',
         );
       }
 
@@ -612,9 +614,14 @@ export class BillsService {
       const bill = await tx.bill.findFirst({ where: { id, ledgerId } });
       if (!bill) throw new NotFoundException('账单不存在');
 
-      // 股票盈亏账单由每日收盘结算自动维护，只读；删除会错误冲正账户余额
-      if (bill.source === 'stock') {
-        throw new BadRequestException('股票盈亏由每日结算自动维护，不可删除');
+      // 股票纸面 / 平仓盈亏由系统维护，只读。
+      // 纸面结算改余额但流水被对账排除；平仓流水不改余额——删除任一类都会让余额对不上。
+      if (bill.source === 'stock' || bill.source === 'stock_close') {
+        throw new BadRequestException(
+          bill.source === 'stock_close'
+            ? '平仓盈亏由系统记账，不可删除'
+            : '股票盈亏由每日结算自动维护，不可删除',
+        );
       }
 
       await tx.bill.delete({ where: { id } });

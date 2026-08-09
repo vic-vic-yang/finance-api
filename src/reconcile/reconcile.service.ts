@@ -76,20 +76,25 @@ export class ReconcileService {
 
     const [nonStockAgg, stockAgg, windowBills, recurring, categories] =
       await Promise.all([
-        // 全历史非 stock 流水净额（余额恒等式用；转账双腿天然各记一收一支）
+        // 全历史非股票流水净额（余额恒等式用；转账双腿天然各记一收一支）。
+        // 排除 paper stock（改余额但恒等式不算）与 stock_close（计入收支但不改余额）。
         this.prisma.bill.groupBy({
           by: ['accountId', 'type'],
           where: {
             ledgerId,
             accountId: { in: accountIds },
-            source: { not: 'stock' },
+            source: { notIn: ['stock', 'stock_close'] },
           },
           _sum: { amount: true },
         }),
-        // stock 流水净额（仅用于"偏差可能来自纸面盈亏"提示）
+        // stock / stock_close 净额（仅用于"偏差可能来自股票记账"提示）
         this.prisma.bill.groupBy({
           by: ['accountId', 'type'],
-          where: { ledgerId, accountId: { in: accountIds }, source: 'stock' },
+          where: {
+            ledgerId,
+            accountId: { in: accountIds },
+            source: { in: ['stock', 'stock_close'] },
+          },
           _sum: { amount: true },
         }),
         // 月窗账单（重复 / 缺腿 / 周期匹配用），含密文摘要字段

@@ -7,9 +7,11 @@ import { Prisma } from '@prisma/client';
  *  - 只操作明文字段（amount / date / type / accountId / categoryId），
  *    绝不触碰 noteCipher / nameCipher（端到端加密隐私不变式）。
  *  - 金额一律 Prisma.Decimal 运算，禁止浮点累加；仅序列化输出时转 number。
- *  - source='stock' 的纸面盈亏账单由每日结算自动维护（且按市值变化增减余额，
- *    与账单口径的「当日盈亏」存在结算差），四项检查统一排除；
- *    balanceDrift 另把 stock 净额作为提示信息返回。
+ *  - source='stock' 纸面盈亏：每日结算维护，按市值变化增减余额，与「当日盈亏」
+ *    流水口径可能有结算差；四项检查排除。
+ *  - source='stock_close' 平仓已实现盈亏：计入收支但不改余额（避免与纸面双计）；
+ *    余额恒等式与疑似重复检查同样排除。
+ *    balanceDrift 另把股票相关净额作为提示信息返回。
  */
 
 export type ReconcileSeverity = 'ok' | 'info' | 'warning' | 'critical';
@@ -161,7 +163,7 @@ export function checkSuspectedDuplicates(
 ): SuspectedDuplicateItem[] {
   const groups = new Map<string, RcBill[]>();
   for (const b of bills) {
-    if (b.source === 'stock') continue;
+    if (b.source === 'stock' || b.source === 'stock_close') continue;
     const key = `${b.accountId}|${b.type}|${dec(b.amount).toFixed(2)}`;
     const arr = groups.get(key);
     if (arr) arr.push(b);
@@ -207,7 +209,7 @@ export function checkSuspectedDuplicates(
   // 所以 externalId、bankBalance 在这里不作反证；单号相同反而是强信号。
   const xGroups = new Map<string, RcBill[]>();
   for (const b of bills) {
-    if (b.source === 'stock') continue;
+    if (b.source === 'stock' || b.source === 'stock_close') continue;
     const key = `${b.type}|${dec(b.amount).toFixed(2)}`;
     const arr = xGroups.get(key);
     if (arr) arr.push(b);
@@ -285,7 +287,7 @@ export function checkRecurringMissing(
   const startMs = monthStart.getTime();
   const endMs = monthEnd.getTime();
   const monthBills = bills.filter((b) => {
-    if (b.source === 'stock') return false;
+    if (b.source === 'stock' || b.source === 'stock_close') return false;
     const ms = b.date.getTime();
     return ms >= startMs && ms <= endMs;
   });
@@ -327,7 +329,7 @@ export function checkTransferOrphans(
   windowDays = 2,
 ): RcBill[] {
   const transfers = bills
-    .filter((b) => b.isTransfer && b.source !== 'stock')
+    .filter((b) => b.isTransfer && b.source !== 'stock' && b.source !== 'stock_close')
     .sort((x, y) => x.date.getTime() - y.date.getTime() || x.id.localeCompare(y.id));
 
   const windowMs = windowDays * DAY_MS;
