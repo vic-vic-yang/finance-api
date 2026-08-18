@@ -270,3 +270,40 @@ export function goalEtaDate(i: GoalEtaInput): Date | null {
   eta.setDate(eta.getDate() + days);
   return eta;
 }
+
+// ── 解释优先的预测：归因分解 ─────────────────────────────────
+
+/** 单个驱动项：对月末净资产的贡献（正=增加，负=减少） */
+export interface ForecastAttributionItem {
+  key: string;
+  label: string;
+  amount: Prisma.Decimal;
+}
+
+/**
+ * 把「月末净资产预测」拆成可解释的驱动项：
+ *  - monthly：当前净资产 + 剩余收入 − 剩余支出（周期扣款已含在历史月均中，不重复加）；
+ *  - daily：当前净资产 + 日均净流入外推 + 本月剩余周期账单净额。
+ * 各驱动项之和 == projected（与 monthlyPatternForecast / monthEndNetWorth 口径一致），
+ * 供前端直接渲染「预测为什么是这个数」。
+ */
+export function buildForecastAttribution(i: {
+  method: 'monthly' | 'daily';
+  currentNetWorth: Prisma.Decimal;
+  remainingIncome: Prisma.Decimal;
+  remainingExpense: Prisma.Decimal;
+  dailyNetInflow: Prisma.Decimal;
+  remainingRecurringNet: Prisma.Decimal;
+}): ForecastAttributionItem[] {
+  const out: ForecastAttributionItem[] = [
+    { key: 'current', label: '当前净资产', amount: i.currentNetWorth },
+  ];
+  if (i.method === 'monthly') {
+    out.push({ key: 'income', label: '预计剩余收入（固定收入 / 月均）', amount: i.remainingIncome });
+    out.push({ key: 'expense', label: '预计剩余支出（当前节奏 vs 历史月均取较大者）', amount: i.remainingExpense.neg() });
+  } else {
+    out.push({ key: 'daily', label: '按近 30 日日均净流入外推', amount: i.dailyNetInflow });
+    out.push({ key: 'recurring', label: '本月剩余周期账单净额', amount: i.remainingRecurringNet });
+  }
+  return out;
+}

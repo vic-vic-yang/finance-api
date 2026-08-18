@@ -1,6 +1,6 @@
 # 司库 · 后端 (finance-api)
 
-「司库」是一款 AI 加持的个人 / 家庭财务管家，支持共享账本、端到端加密、AI 智能导入、私人 CFO 助手、每日财经资讯、股票分析、财务工具箱，并为客户端提供自助升级。本仓库是其 **NestJS 后端**。
+「司库」是一款 AI 加持的个人 / 家庭财务管家，支持共享账本、端到端加密、AI 智能导入、私人 CFO 助手、每周管家简报、财务健康评分、现金流预测、股票分析、财务工具箱，并为客户端提供自助升级。本仓库是其 **NestJS 后端**。
 
 前端仓库：[finance-app](https://github.com/vic-vic-yang/finance-app)（Flutter）。
 
@@ -14,7 +14,7 @@
 | ORM | Prisma 5 |
 | 包管理 | pnpm 10 |
 | 国密加密 | SM2 / SM3 / SM4（`sm-crypto`） |
-| 定时任务 / 抓取 | `@nestjs/schedule` / `rss-parser` |
+| 定时任务 | `@nestjs/schedule`（每周管家简报 + CFO 主动扫描） |
 
 ## 快速开始
 
@@ -52,8 +52,7 @@ pnpm test               # 单元测试（Jest）
 | `LLM_n_URL` / `LLM_n_KEY` / `LLM_n_MODEL` | 第 n 个 LLM 槽位（OpenAI 兼容），最多 20 个 |
 | `LLM_n_VISION` | 可选，覆盖视觉能力自动识别 |
 | `AI_DEFAULT_TEXT_MODEL` / `AI_DEFAULT_VISION_MODEL` | 默认文本 / 视觉模型 |
-| `NEWS_RSS_FEEDS` | 可选，覆盖默认财经 RSS 源 |
-| `NEWS_USE_LLM` / `NEWS_ANALYZE_AT_INGEST` / `NEWS_ANALYZE_LIMIT` | 资讯 LLM 富化 / 入库分析 开关与上限 |
+| `LLM_CONFIG_SECRET` | 账本共享 LLM Key 的加密密钥（缺省回落 `JWT_SECRET`） |
 
 > `.env` / `.env.local` 已被 `.gitignore`，**切勿提交密钥**。LLM 槽位示例见 `.env.example`。
 
@@ -72,11 +71,18 @@ src/
 ├── stats/       收支汇总 + 分类占比
 ├── goals/       储蓄目标
 ├── ai/          AI 导入 + 对话助手（提取 → LLM 解析 → 去重 → 客户端应用）
-│   └── llm/     OpenAI 兼容客户端 + 槽位注册中心（ai/cfo/news/tools 共用）
+│   └── llm/     OpenAI 兼容客户端 + 槽位注册中心（ai/cfo/tools/briefing 共用）
 ├── cfo/         私人 CFO：纯函数检测器 → 提议 → 审批 → 执行 → 学习
 ├── recurring/   周期账单 / 订阅管家（按需补算，无 cron）
 ├── insights/    AI 消费洞察
-├── news/        每日财经资讯 agent（RSS 聚合 + LLM 富化 + 全文要点分析）
+├── loans/       借贷往来（借出 / 借入 + 还款记录）
+├── admin/       管理后台 API（用户 / VIP / 角色 / 概览）
+├── uploads/     通用文件上传（凭证、图标等）
+├── forecast/    现金流预测
+├── notifications/ 通知中心 + CFO 主动扫描（每日 cron）
+├── reconcile/   对账中心（四项一致性检查，只读报告）
+├── health/      财务健康评分
+├── briefing/    每周管家简报（周一 cron）
 ├── tools/       工具：汇率换算代理；股票分析（行情 / 基本面 / 评级 / 持仓 / AI 建议）
 ├── app-update/  App 自助升级：版本查询 + APK 下载（热读 app-release/）
 ├── crypto/      SM2/SM3/SM4 实现 + KMS
@@ -91,10 +97,10 @@ src/
 
 审批制财务 agent：检测器（纯函数，仅读 amount/date/categoryId/balance 等**明文**字段，结构性保证不碰加密 note/name）产出提议 → 用户确认 → 服务端执行 / 客户端补密文 → 学习（忽略多次则静音）。惰性按需生成，不用 cron。
 
-### 财经资讯 agent (`src/news/`)
+### 每周管家简报与定时任务
 
-- 18 个 RSS 源（`NEWS_RSS_FEEDS` 可覆盖），每天 7:00 / 12:00 / 20:00 定时 + 打开页面 >5h 按需补抓 + 启动补抓。
-- LLM 翻译中文标题、摘要、分类（含 AI）、重要性打分；**扫库补齐**式全文要点分析（幂等、重启自愈）。
+- **CFO 主动扫描**（`notifications/proactive-scan.service.ts`）：每日 08:17 cron 对「近 30 天有记账」用户的账本跑检测器，新建 critical / warning 提案写入通知中心。
+- **每周管家简报**（`briefing/briefing.scheduler.ts`）：每周一 08:37 cron 对「近 14 天有记账且开启简报」的用户生成上周周报（聚合事实 + LLM 正文，失败降级模板），写入通知中心。
 
 ### 股票分析 (`src/tools/stock.service.ts`)
 
@@ -117,3 +123,17 @@ src/
 ## 公网访问
 
 通过 Cloudflare Tunnel 暴露：`手机 → 边缘域名 → Tunnel → 本机 :3000`。
+# Admin 自动发版配置
+
+管理后台发版需要在后端 `.env` 配置 `GITHUB_RELEASE_TOKEN`，并在 `finance-app` GitHub 仓库配置以下 Actions Secrets：
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_STORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+- `ANDROID_SIGN_SHA256`
+- `ECS_DEPLOY_HOST`
+- `ECS_DEPLOY_USER`
+- `ECS_DEPLOY_SSH_KEY`
+
+ECS 首次部署时使用 `deploy/scripts/install-release-user.sh` 创建受限账号，再把 `deploy/nginx/admin-location.conf.example` 合并到站点配置。Admin 通过 `docker compose up -d --build admin` 启动，并仅绑定 `127.0.0.1:3001`。

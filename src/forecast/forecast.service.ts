@@ -10,6 +10,7 @@ import {
   recurringNetBetween,
   expensePace,
   goalEtaDate,
+  buildForecastAttribution,
   IncomeBillLike,
   RecurringLike,
 } from './forecast.calc';
@@ -237,6 +238,20 @@ export class ForecastService {
       });
     }
 
+    // ── 1.5) 归因：预测由哪些驱动项构成（解释优先，各驱动项之和 == projected） ──
+    const attribution = buildForecastAttribution({
+      method,
+      currentNetWorth,
+      remainingIncome: remainingIncome ?? new Prisma.Decimal(0),
+      remainingExpense: remainingExpense ?? new Prisma.Decimal(0),
+      dailyNetInflow: avgDailyNetInflow.mul(remainingDays),
+      remainingRecurringNet,
+    }).map((a) => ({
+      key: a.key,
+      label: a.label,
+      amount: Number(a.amount.toDecimalPlaces(2)),
+    }));
+
     // ── 2) 未来 30 天周期扣款（含已到期未生成的，服务端只给明文+密文透传） ──
     const upcoming30 = recurring
       .filter((r) => r.nextDate.getTime() <= in30Days.getTime())
@@ -317,6 +332,7 @@ export class ForecastService {
         projectedMonthExpense: r2(pace.projectedMonthExpense),
         overspendRisk: pace.overspendRisk,
       },
+      attribution,
       goalForecast,
     };
   }

@@ -33,9 +33,11 @@ pnpm test               # Jest unit tests
 **Multi-domain NestJS monolith.** Each feature is a module (controller + service) registered in `src/app.module.ts`, sharing one `PrismaService` (`src/prisma/`) and one Postgres DB. The `finance-app` client uses the finance + AI domains; the others back adjacent products in the same app:
 - **Finance core:** `auth`, `ledgers` (shared ledgers + invites + members), `accounts`, `categories`, `bills`, `budgets`, `recurring`, `goals`, `insights`, `stats`.
 - **AI:** `ai/` — imports, NL parse, chat assistant, monthly report, insights.
-- **Adjacent:** `cfo`, `news`, `picks` (stock daily-picks), `loans`, `tools`, `app-update` (client self-update). `common/` shared utils, `crypto/` server-side KEK helpers, `uploads/` static.
+- **Adjacent:** `cfo`, `loans`, `tools` (exchange + stock), `app-update` (client self-update), `briefing` (weekly digest), `notifications` (notification center + proactive CFO scan), `reconcile` (ledger consistency checks), `health` (financial health score), `forecast` (cash-flow projection). `common/` shared utils, `crypto/` server-side KEK helpers, `uploads/` static.
 
-The Prisma schema (`prisma/schema.prisma`) therefore mixes finance tables (`Bill`, `Account`, `Category`, `Ledger`, `LedgerMember`, `LedgerInvite`, `Budget`, `RecurringBill`, `SavingsGoal`, `AiImport`, `AiInsightDismissal`) with other domains (`Proposal`, `NewsArticle`, `StockAnalysis`, `Loan`, `StockHolding`, `DailyPick`, …).
+The Prisma schema (`prisma/schema.prisma`) therefore mixes finance tables (`Bill`, `Account`, `Category`, `Ledger`, `LedgerMember`, `LedgerInvite`, `Budget`, `RecurringBill`, `SavingsGoal`, `AiImport`, `AiInsightDismissal`) with other domains (`Proposal`, `Notification`, `Briefing`, `CfoAutoRule`, `StockAnalysis`, `StockHolding`, `Loan`, `LedgerLlmConfig`, `CategoryCorrection`, `AiCorrection`, …). The legacy `DailyPickRun` / `DailyPick` / `PicksMemory` tables (old "daily stock picks") remain in the schema but have no code references.
+
+**Scheduled jobs** (`@nestjs/schedule` is enabled): `briefing/briefing.scheduler.ts` runs weekly (Mon 08:37) to generate last week's briefings for active users; `notifications/proactive-scan.service.ts` runs daily (08:17) to scan active ledgers with the CFO detectors and fan out new critical/warning proposals into the notification center. Both are idempotent (unique keys + inflight lock).
 
 ### End-to-end encryption is the defining constraint
 

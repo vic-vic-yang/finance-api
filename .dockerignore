@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.env.local
+app-release
+*.log
+.git
+Dockerfile
+docker-compose.yml

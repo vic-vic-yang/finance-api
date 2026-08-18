@@ -16,4 +16,8 @@ export class CreateBudgetDto {
 
   @IsDateString()
   startDate: string;
+
+  @IsOptional()
+  @IsString()
+  ownerId?: string;
 }

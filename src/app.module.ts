@@ -27,6 +27,8 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { ReconcileModule } from './reconcile/reconcile.module';
 import { HealthModule } from './health/health.module';
 import { BriefingModule } from './briefing/briefing.module';
+import { TimelineModule } from './timeline/timeline.module';
+import { FamilyReviewModule } from './family-review/family-review.module';
 
 @Module({
   imports: [
@@ -61,6 +63,8 @@ import { BriefingModule } from './briefing/briefing.module';
     ReconcileModule,
     HealthModule,
     BriefingModule,
+    TimelineModule,
+    FamilyReviewModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Delete,
   Patch,
   Body,
   HttpCode,
@@ -94,5 +95,13 @@ export class AuthController {
   @Get('vip-status')
   vipStatus(@Req() req: any) {
     return this.authService.getVipStatus(req.user.id);
+  }
+
+  // 注销账号：上架合规要求，删除用户及个人数据（先清共享账本约束）
+  @UseGuards(AuthGuard('jwt'))
+  @Delete('me')
+  @HttpCode(HttpStatus.OK)
+  deleteMe(@Req() req: any) {
+    return this.authService.deleteAccount(req.user.id);
   }
 }

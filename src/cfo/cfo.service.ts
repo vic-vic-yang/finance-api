@@ -397,6 +397,18 @@ export class CfoService {
   private async execute(ledgerId: string, p: any) {
     const params = (p.actionParams ?? {}) as any;
     if (p.actionKind === 'acknowledge') return; // 仅确认，无副作用
+    if (p.actionKind === 'reconcile_balance') {
+      // 对账闭环：把账户余额校准到「初始余额 + 流水净额」的推算值
+      const account = await this.prisma.account.findFirst({
+        where: { id: params.accountId as string, ledgerId },
+      });
+      if (!account) throw new BadRequestException('账户不存在');
+      await this.prisma.account.update({
+        where: { id: account.id },
+        data: { balance: new Prisma.Decimal(String(params.balance)) },
+      });
+      return;
+    }
     if (p.actionKind === 'adjust_budget') {
       const newLimit = new Prisma.Decimal(String(params.newLimit));
       if (params.budgetId) {

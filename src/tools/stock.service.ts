@@ -40,6 +40,12 @@ export class StockService {
     private readonly prisma: PrismaService,
   ) {}
 
+  // 上架合规开关：STOCK_AI_ENABLED=true 才启用 AI 持仓解读（默认关闭）。
+  // 关闭时股票功能仅提供行情 + 持仓盈亏 + 基本信息，不输出任何分析/评级/建议。
+  private get stockAiEnabled(): boolean {
+    return (process.env.STOCK_AI_ENABLED || 'false').toLowerCase() === 'true';
+  }
+
   // ── crumb / cookie ────────────────────────────────────────
   private async ensureCrumb(force = false): Promise<CrumbState> {
     const now = Date.now();
@@ -285,84 +291,6 @@ export class StockService {
   // ── LLM 分析（结构化）──────────────────────────────────────
   private emptyAnalysis() {
     return { business: '', market: '', analyst: '', rating: '', suggestion: '' };
-  }
-
-  private async analyze(
-    q: any,
-    summary: string | null,
-    newsTitles: string[],
-    prior?: { date: string; price: any; pe: any; target: any },
-    holding?: { buyPrice: number; shares: number } | null,
-  ): Promise<{
-    business: string;
-    market: string;
-    analyst: string;
-    rating: string;
-    suggestion: string;
-  }> {
-    const modelName = this.llms.defaultTextModelName();
-    if (!modelName) return this.emptyAnalysis();
-    const pct = (v: number | null) =>
-      v == null ? '—' : (v * 100).toFixed(1) + '%';
-    const facts = [
-      `名称：${q.name}(${q.symbol})  交易所：${q.exchange}  币种：${q.currency}`,
-      `现价：${q.price}  涨跌：${q.change}(${q.changePercent == null ? '—' : q.changePercent.toFixed(2) + '%'})`,
-      `市值：${q.marketCap}  市盈率(TTM)：${q.pe}  预期PE：${q.forwardPe}  市净率：${q.pb}  PEG：${q.peg}`,
-      `EPS：${q.eps}  Beta：${q.beta}  股息率：${pct(q.dividendYield)}`,
-      `52周高/低：${q.high52}/${q.low52}  50/200日均线：${q.ma50}/${q.ma200}`,
-      `分析师评级：${q.recommendation}(均值${q.recommendationMean}, ${q.analystCount}人)  目标价 低/均/高：${q.targetLow}/${q.targetMean}/${q.targetHigh}`,
-      `利润率：${pct(q.profitMargins)}  ROE：${pct(q.roe)}  营收增速：${pct(q.revenueGrowth)}  盈利增速：${pct(q.earningsGrowth)}`,
-      `行业：${q.sector} / ${q.industry}  国家：${q.country}`,
-    ].join('\n');
-    const sumLine = summary
-      ? `\n\n公司业务说明(英文，供你概括为中文主营业务)：\n${String(summary).slice(0, 1600)}`
-      : '';
-    const newsLine = newsTitles.length
-      ? `\n\n近期相关新闻标题：\n${newsTitles.slice(0, 10).map((t) => `- ${t}`).join('\n')}`
-      : '';
-    const priorLine = prior
-      ? `\n\n上次查询(${prior.date})：现价 ${prior.price}、市盈率 ${prior.pe}、目标均价 ${prior.target}。请在 market 里点出与上次相比的关键变化。`
-      : '';
-    let holdingLine = '';
-    if (holding && holding.buyPrice > 0 && holding.shares > 0) {
-      const cur = typeof q.price === 'number' ? q.price : null;
-      const plPct =
-        cur != null
-          ? (((cur - holding.buyPrice) / holding.buyPrice) * 100).toFixed(2)
-          : '—';
-      holdingLine = `\n\n【用户持仓】成本价 ${holding.buyPrice}，持有 ${holding.shares} 股，现价 ${cur}，浮动盈亏约 ${plPct}%。请在 suggestion 里针对该持仓给出明确操作建议（继续持有 / 逢低加仓 / 部分止盈 / 止损减仓 / 清仓等），结合成本与当前盈亏、估值和风险说明理由。`;
-    }
-    const suggestionDesc = holdingLine
-      ? '针对用户持仓的操作建议：给出明确操作倾向(继续持有/逢低加仓/部分止盈/止损减仓/清仓等)、结合其成本与盈亏的理由，并提示主要风险'
-      : '明确的买入建议：给出操作倾向(适合买入/逢低布局/持有观望/暂时回避等)、理由，并提示主要风险';
-    const system =
-      '你是资深证券分析师。基于给定数据用中文分析，严格只返回 JSON：' +
-      '{"business":"公司简介与主营业务，2-3句","market":"市场动态：结合近期股价/估值/新闻的表现与事件","analyst":"分析师观点综合：评级与目标价相对现价的空间","rating":"你的综合评级，从【买入/增持/中性/减持/卖出】里选一个","suggestion":"' +
-      suggestionDesc +
-      '"}。客观、只依据所给数据，不编造数字。suggestion 末尾另起一句「⚠️ 仅供参考，不构成投资建议」。';
-    try {
-      const res = await this.llms.get(modelName).chat(
-        [
-          { role: 'system', content: system },
-          {
-            role: 'user',
-            content: facts + sumLine + newsLine + priorLine + holdingLine,
-          },
-        ],
-        { responseFormat: 'json_object', temperature: 0.3, maxTokens: 2200 },
-      );
-      const j = parseJsonLoose(res.content || '') || {};
-      return {
-        business: String(j.business || ''),
-        market: String(j.market || ''),
-        analyst: String(j.analyst || ''),
-        rating: String(j.rating || '').slice(0, 4),
-        suggestion: String(j.suggestion || ''),
-      };
-    } catch (e) {
-      this.logger.warn(`分析失败：${(e as Error).message}`);
-      return this.emptyAnalysis();
-    }
   }
 
   // ── 公司最新新闻 ──────────────────────────────────────────
@@ -669,6 +597,17 @@ export class StockService {
     );
     const holding = await this.getHolding(userId, symbol);
 
+    // 合规：关闭 AI 时清空分析师评级/目标价等证券分析字段，仅保留行情 + 基本面 + 基本信息
+    if (!this.stockAiEnabled) {
+      quote.recommendation = null;
+      quote.recommendationMean = null;
+      quote.targetMean = null;
+      quote.targetHigh = null;
+      quote.targetLow = null;
+      quote.analystCount = null;
+      quote.recTrend = null;
+    }
+
     // 存快照（仅名称 + 行情，供持仓列表取名/最新价用）+ 修剪历史
     const row = await this.prisma.stockAnalysis.create({
       data: {
@@ -760,57 +699,6 @@ export class StockService {
     };
   }
 
-  /**
-   * 每日持仓决策分析：把「我的持仓 + 股票数据」喂给 LLM，扮演资深分析师给出
-   * 加仓/持有/减仓/清仓/观望 的明确建议与理由。供每日结算时调用、存库。
-   */
-  async analyzeHoldingDecision(
-    symbol: string,
-    holding: { buyPrice: number; shares: number; currentPrice?: number | null },
-  ): Promise<{ action: string; reason: string } | null> {
-    const modelName = this.llms.defaultTextModelName();
-    if (!modelName) return null;
-    const quote = await this.fetchQuote(symbol).catch(() => null);
-    if (!quote) return null;
-    const cur = holding.currentPrice ?? quote.price ?? null;
-    const cost = holding.buyPrice;
-    const plPct =
-      cur != null && cost > 0
-        ? (((cur - cost) / cost) * 100).toFixed(2)
-        : '—';
-    const mktValue = cur != null ? (cur * holding.shares).toFixed(2) : '—';
-    const facts = [
-      `名称：${quote.name}(${quote.symbol})  币种：${quote.currency}`,
-      `现价：${cur}  市值：${quote.marketCap}  市盈率：${quote.pe}  预期PE：${quote.forwardPe}  市净率：${quote.pb}  PEG：${quote.peg}`,
-      `EPS：${quote.eps}  ROE：${quote.roe}  利润率：${quote.profitMargins}  营收增速：${quote.revenueGrowth}`,
-      `52周高/低：${quote.high52}/${quote.low52}  50/200日均线：${quote.ma50}/${quote.ma200}`,
-      `分析师评级：${quote.recommendation}(${quote.analystCount}人)  目标价 低/均/高：${quote.targetLow}/${quote.targetMean}/${quote.targetHigh}`,
-      `行业：${quote.sector} / ${quote.industry}`,
-    ].join('\n');
-    const holdingLine = `\n\n【我的持仓】成本价 ${cost}，持有 ${holding.shares} 股，现价 ${cur}，持仓市值约 ${mktValue}，浮动盈亏约 ${plPct}%。`;
-    const system =
-      '你是资深证券分析师，正在为客户做每日持仓复盘。基于给定数据用中文分析，严格只返回 JSON：' +
-      '{"action":"从【加仓/持有/减仓/清仓/观望】里选一个最贴切的","reason":"针对该持仓的决策理由：结合成本与当前盈亏、估值水平、分析师目标价空间、主要风险，150字内，最后一句「⚠️ 仅供参考，不构成投资建议」"}。' +
-      '客观、只依据所给数据，不编造数字。';
-    try {
-      const res = await this.llms.get(modelName).chat(
-        [
-          { role: 'system', content: system },
-          { role: 'user', content: facts + holdingLine },
-        ],
-        { responseFormat: 'json_object', temperature: 0.3, maxTokens: 1200 },
-      );
-      const j = parseJsonLoose(res.content || '') || {};
-      const action = String(j.action || '').slice(0, 6);
-      const reason = String(j.reason || '');
-      if (!reason) return null;
-      return { action, reason };
-    } catch (e) {
-      this.logger.warn(`持仓决策分析失败：${(e as Error).message}`);
-      return null;
-    }
-  }
-
   private parseAdvice(
     raw: string | null,
   ): { action: string; reason: string } | null {
@@ -851,6 +739,9 @@ export class StockService {
   >();
 
   async portfolioInsight(userId: string, force = false, llm?: ResolvedLlm){
+    if (!this.stockAiEnabled) {
+      return { text: '', generatedAt: null, disabled: true };
+    }
     const day = new Date().toISOString().slice(0, 10);
     const cached = this.insightCache.get(userId);
     if (!force && cached && cached.day === day) {

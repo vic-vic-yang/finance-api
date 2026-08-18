@@ -72,6 +72,7 @@ model User {
   /// bcrypt 密码哈希（12 rounds）
   password        String
   createdAt       DateTime       @default(now())
+  lastActiveAt    DateTime?
   /// 当前活动账本 ID
   currentLedgerId String?
   currentLedger   Ledger?        @relation("CurrentLedger", fields: [currentLedgerId], references: [id], onDelete: SetNull)
@@ -84,6 +85,8 @@ model User {
   aiCorrections   AiCorrection[] @relation("UserAiCorrections")
   notifications   Notification[]
   briefings       Briefing[]
+  ownedBudgets    Budget[]       @relation("BudgetOwner")
+  releaseJobs     ReleaseJob[]
 
   // ── 国密 SM2 用户密钥对（端到端加密基础）───────────────────
   /// SM2 公钥（hex 字符串，未压缩 04|x|y 共 130 个字符）
@@ -96,6 +99,8 @@ model User {
   kdfSalt           Bytes?
   /// 恢复码 SM3(code || salt) 哈希，用于"忘密码 → 验证恢复码"
   recoveryHash      Bytes?
+
+  @@index([lastActiveAt(sort: Desc)])
 }
 
 /// 账本：个人或共享的财务管理容器，拥有自己的账户/分类/账单/预算/成员体系
@@ -446,6 +451,9 @@ model Budget {
   id         String       @id @default(cuid())
   ledgerId   String
   ledger     Ledger       @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  /// 预算责任人：null = 共享（全员），非空 = 仅该成员负责（家庭共同预算）
+  ownerId    String?
+  owner      User?        @relation("BudgetOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   /// 关联分类 ID（null=总预算）
   categoryId String?
   category   Category?    @relation(fields: [categoryId], references: [id])
@@ -459,6 +467,7 @@ model Budget {
   updatedAt  DateTime     @updatedAt
 
   @@index([ledgerId])
+  @@index([ownerId])
 }
 
 /// 周期账单（房租 / 会员订阅 / 话费 …）
@@ -809,4 +818,27 @@ model Briefing {
 
   @@unique([userId, ledgerId, weekStart])
   @@index([userId, ledgerId, createdAt(sort: Desc)])
+}
+
+model ReleaseJob {
+  id            String   @id @default(cuid())
+  version       String
+  buildNumber   Int
+  versionBump   String
+  releaseType   String
+  notes         String
+  status        String   @default("queued")
+  githubRunId   String?
+  apkFile       String?
+  apkSize       Int?
+  downloadUrl   String?
+  errorMessage  String?
+  createdById   String
+  createdBy     User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt     DateTime @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@index([status, createdAt])
+  @@index([createdById, createdAt])
 }

@@ -11,6 +11,8 @@ import {
   checkTransferOrphans,
   worstSeverity,
 } from './checks';
+import { scoreDataTrust } from './trust-score';
+import { buildReconcileDrafts } from './reconcile-actions';
 
 /** 对账报告的区块（前端按 key 渲染对应条目结构） */
 export interface ReconcileSection {
@@ -290,6 +292,85 @@ export class ReconcileService {
     ];
 
     return { month: key, generatedAt: now, sections };
+  }
+
+  /** GET /reconcile/data-trust —— 数据可信度评分：把四项一致性检查 + 账户覆盖率
+   *  合成 0-100 分，供 AI 结论挂「可信度」角标。纯函数在 trust-score.ts。 */
+  async trustScore(userId: string, ledgerId: string, month?: string) {
+    // report() 内部已做 ensureMembership + 月份校验
+    const rep = await this.report(userId, ledgerId, month);
+    const countOf = (key: string) =>
+      rep.sections.find((s) => s.key === key)?.count ?? 0;
+
+    // 账户覆盖率：可见账户中近 90 天有流水的占比
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 86_400_000);
+    const visible = await this.prisma.account.findMany({
+      where: { ledgerId, OR: [{ ownerId: null }, { ownerId: userId }] },
+      select: { id: true },
+    });
+    const covered = await this.prisma.bill.groupBy({
+      by: ['accountId'],
+      where: {
+        ledgerId,
+        accountId: { in: visible.map((a) => a.id) },
+        date: { gte: ninetyDaysAgo },
+      },
+    });
+
+    const result = scoreDataTrust({
+      totalAccounts: visible.length,
+      coveredAccounts: covered.length,
+      balanceDriftCount: countOf('balanceDrift'),
+      duplicateCount: countOf('suspectedDuplicates'),
+      missingRecurringCount: countOf('recurringMissing'),
+      orphanTransferCount: countOf('transferOrphans'),
+    });
+
+    return { month: rep.month, generatedAt: rep.generatedAt, ...result };
+  }
+
+  /** POST /reconcile/proposals —— 对账闭环：把本月四项发现生成 CFO 可审批的修复提案。
+   *  幂等（dedupeKey 唯一），重复调用不会重复生成。 */
+  async generateProposals(userId: string, ledgerId: string, month?: string) {
+    const rep = await this.report(userId, ledgerId, month);
+    const drafts = buildReconcileDrafts(rep.sections);
+
+    const created: any[] = [];
+    for (const d of drafts) {
+      const exists = await this.prisma.proposal.findUnique({
+        where: { ledgerId_dedupeKey: { ledgerId, dedupeKey: d.dedupeKey } },
+      });
+      if (exists) continue;
+      created.push(
+        await this.prisma.proposal.create({
+          data: {
+            ledgerId,
+            type: d.type,
+            severity: d.severity,
+            title: d.title,
+            body: d.body,
+            actionKind: d.actionKind,
+            actionParams: d.actionParams as any,
+            requiresClient: d.requiresClient,
+            evidenceRefs: { generatedBy: userId } as any,
+            dedupeKey: d.dedupeKey,
+          },
+        }),
+      );
+    }
+
+    return {
+      month: rep.month,
+      generated: created.length,
+      proposals: created.map((p) => ({
+        id: p.id,
+        type: p.type,
+        title: p.title,
+        actionKind: p.actionKind,
+        requiresClient: p.requiresClient,
+        severity: p.severity,
+      })),
+    };
   }
 
   /** month=YYYY-MM（缺省 = 当前月）；月界按服务器本地时区，与 insights/budgets 一致 */

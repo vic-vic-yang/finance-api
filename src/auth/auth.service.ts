@@ -112,6 +112,11 @@ export class AuthService {
     const match = await bcrypt.compare(dto.password, user.password);
     if (!match) throw new UnauthorizedException('用户名或密码错误');
 
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { lastActiveAt: new Date() },
+    });
+
     // 防御：极少数情况下用户没有当前账本（被踢出唯一账本）
     // E2E 加密下，服务端无法自动建账本（无法生成 DEK），让客户端拿到 keyBundle
     // 后调 POST /ledgers 主动建一个，并把当前账本指向新账本
@@ -328,5 +333,57 @@ export class AuthService {
           ? Math.ceil((user.vipExpiresAt.getTime() - now.getTime()) / 86400000)
           : 0,
     };
+  }
+
+  /**
+   * 注销账号（上架合规要求的注销入口）：删除用户个人数据。
+   *
+   * 前置约束：若用户仍是共享账本 owner（还有其他成员）或 member，
+   * 必须先转让/退出，避免误删其他成员的数据。
+   * 通过约束后：手动清「裸 userId」表，再删 User，依赖外键级联删除其
+   * owned 账本（含账本内 Bill/Account/Category/Budget 等）及
+   * Bill/Notification/Briefing/AiImport/AiCorrection/LedgerMember 等。
+   */
+  async deleteAccount(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('用户不存在');
+
+    // 共享账本约束检查
+    const ownedShared = await this.prisma.ledger.findFirst({
+      where: {
+        ownerId: userId,
+        isPersonal: false,
+        members: { some: { userId: { not: userId } } },
+      },
+    });
+    if (ownedShared) {
+      throw new BadRequestException(
+        '你仍是共享账本的拥有者，请先在「账本管理」转让或删除该账本后再注销',
+      );
+    }
+    const joinedShared = await this.prisma.ledgerMember.findFirst({
+      where: { userId, ledger: { isPersonal: false } },
+    });
+    if (joinedShared) {
+      throw new BadRequestException(
+        '你仍加入了共享账本，请先在「账本管理」退出该账本后再注销',
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1) 无外键级联的「裸 userId」表，需手动清，否则删 User 后成孤儿数据
+      await tx.ledgerInvite.deleteMany({ where: { createdBy: userId } });
+      await tx.ledgerLlmConfig.deleteMany({ where: { ownerUserId: userId } });
+      await tx.stockAnalysis.deleteMany({ where: { userId } });
+      await tx.stockHolding.deleteMany({ where: { userId } });
+      await tx.loan.deleteMany({ where: { userId } });
+      await tx.savingsGoal.deleteMany({ where: { userId } });
+      await tx.aiInsightDismissal.deleteMany({ where: { userId } });
+
+      // 2) 删 User：外键级联删除其 owned 账本及账本内数据、userId 级联表
+      await tx.user.delete({ where: { id: userId } });
+    });
+
+    return { deleted: true };
   }
 }

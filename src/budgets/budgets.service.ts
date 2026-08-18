@@ -250,6 +250,7 @@ export class BudgetsService {
     const budget = await this.prisma.budget.create({
       data: {
         ledgerId,
+        ownerId: dto.ownerId ?? null,
         categoryId: dto.categoryId ?? null,
         amount: new Prisma.Decimal(dto.amount),
         period: dto.period,
@@ -269,6 +270,7 @@ export class BudgetsService {
         ...(dto.period && { period: dto.period }),
         ...(dto.startDate && { startDate: new Date(dto.startDate) }),
         ...(dto.categoryId !== undefined && { categoryId: dto.categoryId ?? null }),
+        ...(dto.ownerId !== undefined && { ownerId: dto.ownerId ?? null }),
       },
       include: { category: true },
     });

@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Request, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Query, Request, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ReconcileService } from './reconcile.service';
 
@@ -14,5 +14,15 @@ export class ReconcileController {
   @Get('report')
   report(@Request() req, @Query('month') month?: string) {
     return this.svc.report(req.user.id, req.user.currentLedgerId, month);
+  }
+
+  @Get('data-trust')
+  dataTrust(@Request() req, @Query('month') month?: string) {
+    return this.svc.trustScore(req.user.id, req.user.currentLedgerId, month);
+  }
+
+  @Post('proposals')
+  generateProposals(@Request() req, @Query('month') month?: string) {
+    return this.svc.generateProposals(req.user.id, req.user.currentLedgerId, month);
   }
 }

@@ -59,7 +59,10 @@ export class AdminService {
         where,
         skip,
         take: pageSize,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [
+          { lastActiveAt: { sort: 'desc', nulls: 'last' } },
+          { createdAt: 'desc' },
+        ],
         select: {
           id: true,
           username: true,
@@ -69,6 +72,7 @@ export class AdminService {
           vipExpiresAt: true,
           vipNote: true,
           createdAt: true,
+          lastActiveAt: true,
         },
       }),
       this.prisma.user.count({ where }),
@@ -79,6 +83,7 @@ export class AdminService {
         ...u,
         vipExpiresAt: u.vipExpiresAt?.toISOString() ?? null,
         createdAt: u.createdAt.toISOString(),
+        lastActiveAt: u.lastActiveAt?.toISOString() ?? null,
       })),
       total,
       page,
