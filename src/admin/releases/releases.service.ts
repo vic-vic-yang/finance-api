@@ -1,54 +1,71 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, StreamableFile } from '@nestjs/common';
+import type { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
-import { CreateReleaseDto } from './dto/create-release.dto';
-import { GithubActionsClient } from './github-actions.client';
-import { bumpVersion, mapGitHubStatus } from './release-state';
+import { UploadReleaseDto } from './dto/upload-release.dto';
 
 @Injectable()
 export class ReleasesService {
-  private readonly releaseDir = path.join(__dirname, '..', '..', '..', 'app-release');
+  constructor(private readonly prisma: PrismaService) {}
 
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly github: GithubActionsClient,
-  ) {}
+  private get releaseDir() {
+    return process.env.APP_RELEASE_DIR || path.join(__dirname, '..', '..', '..', 'app-release');
+  }
 
-  async create(userId: string, dto: CreateReleaseDto) {
-    const active = await this.prisma.releaseJob.findFirst({
-      where: { status: { in: ['queued', 'building', 'uploading'] } },
-    });
-    if (active) throw new ConflictException('已有发版任务正在执行');
+  private get testReleaseDir() {
+    return process.env.APP_TEST_RELEASE_DIR || path.join(__dirname, '..', '..', '..', 'test-releases');
+  }
 
-    const current = this.current();
-    const job = await this.prisma.releaseJob.create({
-      data: {
-        version: bumpVersion(current.version, dto.versionBump),
-        buildNumber: current.buildNumber + 1,
-        versionBump: dto.versionBump,
-        releaseType: dto.releaseType,
-        notes: dto.notes.trim(),
-        createdById: userId,
-      },
-    });
+  async upload(userId: string, file: Express.Multer.File | undefined, dto: UploadReleaseDto) {
+    if (!file) throw new BadRequestException('请选择 APK 文件');
     try {
-      await this.github.dispatch({
-        jobId: job.id,
-        ...dto,
-        version: job.version,
-        buildNumber: job.buildNumber,
-      });
-      return job;
-    } catch (error) {
-      return this.prisma.releaseJob.update({
-        where: { id: job.id },
+      this.assertApk(file.path);
+      const current = this.current();
+      if (dto.releaseType === 'production' && dto.buildNumber <= current.buildNumber) {
+        throw new BadRequestException(`正式包构建号必须大于当前线上构建号 ${current.buildNumber}`);
+      }
+
+      const targetDir = dto.releaseType === 'production' ? this.releaseDir : this.testReleaseDir;
+      fs.mkdirSync(targetDir, { recursive: true });
+      const apkFile = `siku-${dto.buildNumber}.apk`;
+      this.atomicCopy(file.path, path.join(targetDir, apkFile));
+
+      const publishedAt = new Date();
+      if (dto.releaseType === 'production') {
+        this.atomicWriteJson(path.join(targetDir, 'version.json'), {
+          version: dto.version,
+          buildNumber: dto.buildNumber,
+          apkFile,
+          notes: dto.notes.trim(),
+          publishedAt: publishedAt.toISOString(),
+        });
+      }
+      this.cleanupOldApks(targetDir);
+
+      const job = await this.prisma.releaseJob.create({
         data: {
-          status: 'failed',
-          errorMessage: error instanceof Error ? error.message : 'GitHub 发版触发失败',
-          completedAt: new Date(),
+          version: dto.version,
+          buildNumber: dto.buildNumber,
+          versionBump: 'upload',
+          releaseType: dto.releaseType,
+          notes: dto.notes.trim(),
+          status: 'succeeded',
+          apkFile,
+          apkSize: file.size,
+          downloadUrl: dto.releaseType === 'production' ? '/api/app/download' : null,
+          createdById: userId,
+          startedAt: publishedAt,
+          completedAt: publishedAt,
         },
       });
+      if (dto.releaseType === 'production') return job;
+      return this.prisma.releaseJob.update({
+        where: { id: job.id },
+        data: { downloadUrl: `/api/admin/releases/${job.id}/download` },
+      });
+    } finally {
+      if (file?.path) fs.rmSync(file.path, { force: true });
     }
   }
 
@@ -77,24 +94,55 @@ export class ReleasesService {
     }
   }
 
-  async get(id: string, refresh = true) {
+  async get(id: string) {
     const job = await this.prisma.releaseJob.findUnique({ where: { id } });
-    if (!job) throw new NotFoundException('发版任务不存在');
-    if (!refresh || ['succeeded', 'failed'].includes(job.status)) return job;
-    const run = await this.github.findRun(job.id, job.createdAt);
-    if (!run) return job;
-    const status = mapGitHubStatus(run.status, run.conclusion);
-    return this.prisma.releaseJob.update({
-      where: { id },
-      data: {
-        status,
-        githubRunId: String(run.id),
-        startedAt: job.startedAt || new Date(run.created_at),
-        completedAt: ['succeeded', 'failed'].includes(status) ? new Date() : null,
-        errorMessage: status === 'failed' ? `GitHub Actions 失败：${run.html_url}` : null,
-        downloadUrl:
-          status === 'succeeded' && job.releaseType === 'production' ? '/api/app/download' : job.downloadUrl,
-      },
+    if (!job) throw new NotFoundException('发版记录不存在');
+    return job;
+  }
+
+  async download(id: string, res: Response) {
+    const job = await this.get(id);
+    if (!job.apkFile) throw new NotFoundException('安装包不存在');
+    const dir = job.releaseType === 'production' ? this.releaseDir : this.testReleaseDir;
+    const file = path.join(dir, path.basename(job.apkFile));
+    if (!fs.existsSync(file)) throw new NotFoundException('安装包文件不存在');
+    res.set({
+      'Content-Type': 'application/vnd.android.package-archive',
+      'Content-Disposition': `attachment; filename="${path.basename(job.apkFile)}"`,
     });
+    return new StreamableFile(fs.createReadStream(file));
+  }
+
+  private assertApk(file: string) {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const header = Buffer.alloc(4);
+      fs.readSync(fd, header, 0, 4, 0);
+      if (!header.equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
+        throw new BadRequestException('文件不是有效的 APK');
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  private atomicCopy(source: string, target: string) {
+    const temp = `${target}.tmp-${process.pid}-${Date.now()}`;
+    fs.copyFileSync(source, temp);
+    fs.renameSync(temp, target);
+  }
+
+  private atomicWriteJson(target: string, value: unknown) {
+    const temp = `${target}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(temp, JSON.stringify(value, null, 2));
+    fs.renameSync(temp, target);
+  }
+
+  private cleanupOldApks(dir: string) {
+    const files = fs.readdirSync(dir)
+      .filter((name) => /^siku-\d+\.apk$/.test(name))
+      .map((name) => ({ name, modifiedAt: fs.statSync(path.join(dir, name)).mtimeMs }))
+      .sort((a, b) => b.modifiedAt - a.modifiedAt);
+    for (const file of files.slice(5)) fs.rmSync(path.join(dir, file.name), { force: true });
   }
 }

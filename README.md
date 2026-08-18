@@ -112,7 +112,7 @@ src/
 ### App 自助升级 (`src/app-update/`)
 
 - 公开接口（免登录）：`GET /api/app/version`（最新版本）、`GET /api/app/download`（下载 APK）。
-- 热读 `backend/app-release/version.json` 与 APK，由仓库根目录 `发布新版.bat` 写入，**发版无需重启后端**。
+- 热读 `backend/app-release/version.json` 与 APK。仓库根目录 `发布新版.bat` 只负责本地打包，随后由 Admin「发版管理」上传并原子发布，**发版无需重启后端**。
 
 ## 数据库约定
 

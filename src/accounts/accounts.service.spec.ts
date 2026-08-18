@@ -108,3 +108,41 @@ describe('AccountsService automatic deposits', () => {
     });
   });
 });
+
+describe('AccountsService credit card statement boundary', () => {
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date(2026, 7, 18, 12));
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('puts purchases on statement day into the next statement', async () => {
+    const aggregate = jest
+      .fn()
+      .mockResolvedValueOnce({ _sum: { amount: new Prisma.Decimal('100') } })
+      .mockResolvedValueOnce({ _sum: { amount: new Prisma.Decimal('0') } })
+      .mockResolvedValueOnce({ _sum: { amount: new Prisma.Decimal('30') } });
+    const service = new AccountsService({
+      bill: { aggregate },
+    } as never);
+
+    await (service as any)._creditCardInfo({
+      id: 'credit-1',
+      ledgerId: 'ledger-1',
+      statementDay: 17,
+      dueDay: 5,
+      initialBalance: new Prisma.Decimal('0'),
+      balance: new Prisma.Decimal('-130'),
+      creditLimit: new Prisma.Decimal('10000'),
+    });
+
+    const currentStatementWhere = aggregate.mock.calls[0][0].where;
+    const ongoingWhere = aggregate.mock.calls[2][0].where;
+    expect(currentStatementWhere.date.lt).toEqual(new Date(2026, 7, 17));
+    expect(currentStatementWhere.date.lte).toBeUndefined();
+    expect(ongoingWhere.date.gte).toEqual(new Date(2026, 7, 17));
+    expect(ongoingWhere.date.gt).toBeUndefined();
+  });
+});

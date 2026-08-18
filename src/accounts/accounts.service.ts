@@ -465,8 +465,8 @@ export class AccountsService {
     const dueDay = a.dueDay as number;
     const lastStmt = lastOccurrenceOf(stmtDay, today);
     const prevStmt = addMonths(lastStmt, -1);
-    const periodStart = addDays(prevStmt, 1);
-    const periodEnd = endOfDay(lastStmt);
+    const periodStart = prevStmt;
+    const periodEnd = lastStmt;
     let dueDate = new Date(
       lastStmt.getFullYear(),
       lastStmt.getMonth(),
@@ -479,16 +479,16 @@ export class AccountsService {
         Math.min(dueDay, daysInMonth(lastStmt.getFullYear(), lastStmt.getMonth() + 1)),
       );
     }
-    // 本期账单 = 出账日(periodEnd)那一刻的总欠款，按 初始余额 + 出账日前全部流水 复原。
+    // 本期账单 = 出账日开始前的总欠款；出账日当天消费进入下一期。
     // 不能只加账期窗口内的支出：开户带进来的「初始欠款」也在这期账单里
     // （例：初始欠 901.11 + 账期内消费 953.35 → 真实账单 1854.46）。
     const [expAgg, incAgg] = await Promise.all([
       this.prisma.bill.aggregate({
-        where: { accountId: a.id, ledgerId: a.ledgerId, type: 'expense', date: { lte: periodEnd } },
+        where: { accountId: a.id, ledgerId: a.ledgerId, type: 'expense', date: { lt: periodEnd } },
         _sum: { amount: true },
       }),
       this.prisma.bill.aggregate({
-        where: { accountId: a.id, ledgerId: a.ledgerId, type: 'income', date: { lte: periodEnd } },
+        where: { accountId: a.id, ledgerId: a.ledgerId, type: 'income', date: { lt: periodEnd } },
         _sum: { amount: true },
       }),
     ]);
@@ -500,7 +500,7 @@ export class AccountsService {
     const balance = Number(a.balance);
     const owed = balance < 0 ? -balance : 0;
     const ongoingAgg = await this.prisma.bill.aggregate({
-      where: { accountId: a.id, ledgerId: a.ledgerId, type: 'expense', date: { gt: periodEnd, lte: endOfDay(today) } },
+      where: { accountId: a.id, ledgerId: a.ledgerId, type: 'expense', date: { gte: periodEnd, lte: endOfDay(today) } },
       _sum: { amount: true },
     });
     const ongoingSpent = Number(ongoingAgg._sum.amount || 0);
