@@ -114,6 +114,8 @@ src/
 - 公开接口（免登录）：`GET /api/app/version`（最新版本）、`GET /api/app/download`（下载 APK）。
 - 热读 `backend/app-release/version.json` 与 APK。仓库根目录 `发布新版.bat` 只负责本地打包，随后由 Admin「发版管理」上传并原子发布，**发版无需重启后端**。
 
+服务部署可运行仓库根目录 `部署服务.bat`，交互选择仅部署 API、仅部署 Admin、全部部署或仅执行数据库迁移；也可传 `api`、`admin`、`all`、`migrate` 参数。
+
 ## 数据库约定
 
 - 金额 / 余额用 `Decimal(15,2)`，算术务必 `new Prisma.Decimal()`，禁用原生浮点。
