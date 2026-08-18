@@ -38,10 +38,7 @@ export class AppUpdateService {
     if (!info.apkFile) throw new NotFoundException('暂无可下载的安装包');
     const apk = path.join(this.dir, info.apkFile);
     if (!fs.existsSync(apk)) throw new NotFoundException('安装包文件不存在');
-    res.set({
-      'Content-Type': 'application/vnd.android.package-archive',
-      'Content-Disposition': `attachment; filename="${info.apkFile}"`,
-    });
+    setApkDownloadHeaders(res, apk, info.apkFile);
     const file = new StreamableFile(fs.createReadStream(apk));
     // 大包走隧道，客户端中途断开很常见——静默处理，别当 ERROR 刷屏
     file.setErrorHandler((err: any, response: any) => {
@@ -55,6 +52,14 @@ export class AppUpdateService {
     });
     return file;
   }
+}
+
+export function setApkDownloadHeaders(res: Response, apk: string, apkFile: string) {
+  res.set({
+    'Content-Type': 'application/vnd.android.package-archive',
+    'Content-Disposition': `attachment; filename="${apkFile}"`,
+    'Content-Length': String(fs.statSync(apk).size),
+  });
 }
 
 /** 客户端主动断开（下载中断/取消），属正常现象，不该记 ERROR */
