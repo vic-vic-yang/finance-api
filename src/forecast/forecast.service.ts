@@ -14,6 +14,10 @@ import {
   IncomeBillLike,
   RecurringLike,
 } from './forecast.calc';
+import {
+  BillMatchLike,
+  resolveRecurringNextDate,
+} from '../recurring/recurring-match';
 
 /**
  * 现金流预测（GET /api/forecast）。
@@ -149,6 +153,55 @@ export class ForecastService {
       this.goals.findAll(userId, ledgerId),
     ]);
 
+    const overdueRecurring = recurring.filter(
+      (item) => item.nextDate.getTime() <= now.getTime(),
+    );
+    let effectiveRecurring = recurring;
+    if (overdueRecurring.length > 0) {
+      const earliestDue = Math.min(
+        ...overdueRecurring.map((item) => item.nextDate.getTime()),
+      );
+      const matchingBills = await this.prisma.bill.findMany({
+        where: {
+          ledgerId,
+          isTransfer: false,
+          source: { not: 'stock' },
+          date: {
+            gte: new Date(earliestDue - 7 * 86_400_000),
+            lte: now,
+          },
+        },
+        select: {
+          type: true,
+          amount: true,
+          accountId: true,
+          categoryId: true,
+          date: true,
+        },
+      });
+      effectiveRecurring = recurring.map((item) => ({
+        ...item,
+        nextDate: resolveRecurringNextDate(
+          item as typeof item & { type: 'income' | 'expense' },
+          matchingBills as BillMatchLike[],
+          now,
+        ),
+      }));
+      await Promise.all(
+        effectiveRecurring
+          .filter(
+            (item, index) =>
+              item.nextDate.getTime() !== recurring[index].nextDate.getTime(),
+          )
+          .map((item) =>
+            this.prisma.recurringBill.update({
+              where: { id: item.id },
+              data: { nextDate: item.nextDate },
+            }),
+          ),
+      );
+    }
+
     // ── 1) 月末净资产预测 ─────────────────────────────────────
     // 净资产 = 全部账户余额 + 债权（借出未收）− 负债（借入未还），同统计页
     let loanNet = new Prisma.Decimal(0);
@@ -165,7 +218,7 @@ export class ForecastService {
     const avgDailyNetInflow = inc30.minus(exp30).div(30);
     // 口径：recurring 表 nextDate 落在本月内的（含月初以来已到期未生成的）
     const remainingRecurringNet = recurringNetBetween(
-      recurring as RecurringLike[],
+      effectiveRecurring as RecurringLike[],
       monthStart,
       monthEnd,
     );
@@ -253,7 +306,7 @@ export class ForecastService {
     }));
 
     // ── 2) 未来 30 天周期扣款（含已到期未生成的，服务端只给明文+密文透传） ──
-    const upcoming30 = recurring
+    const upcoming30 = effectiveRecurring
       .filter((r) => r.nextDate.getTime() <= in30Days.getTime())
       .map((r) => ({
         id: r.id,
