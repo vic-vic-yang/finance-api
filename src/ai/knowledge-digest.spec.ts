@@ -97,8 +97,8 @@ describe('routeSlices', () => {
   });
 
   it('「欠/借/负债」→ 借贷切片', () => {
-    expect(routeSlices('我欠别人多少钱')).toContain('loans');
-    expect(routeSlices('我有多少负债')).toEqual(['loans']);
+    expect(routeSlices('我欠别人多少钱')).toEqual(['loans', 'accounts']);
+    expect(routeSlices('我有多少负债')).toEqual(['loans', 'accounts']);
     expect(routeSlices('借出去的钱收回来没')).toEqual(['loans']);
   });
 
@@ -238,7 +238,7 @@ describe('buildKnowledgeText', () => {
   });
 
   it('自定义上限同样生效', () => {
-    const t = buildKnowledgeText('随便聊聊', slices(), 200);
+    const t = buildKnowledgeText('随便聊聊', slices(), undefined, 200);
     expect(t.length).toBeLessThanOrEqual(200);
   });
 });

@@ -1,6 +1,6 @@
 # 司库 · 后端 (finance-api)
 
-「司库」是一款 AI 加持的个人 / 家庭财务管家，支持共享账本、端到端加密、AI 智能导入、私人 CFO 助手、每周管家简报、财务健康评分、现金流预测、股票分析、财务工具箱，并为客户端提供自助升级。本仓库是其 **NestJS 后端**。
+「司库」是一款 AI 加持的个人 / 家庭财务管家，支持共享账本、端到端加密、AI 智能导入、私人 CFO 助手、每周管家简报、财务健康评分、现金流预测、持仓盈亏与财务工具箱，并为客户端提供自助升级。本仓库是其 **NestJS 后端**。
 
 前端仓库：[finance-app](https://github.com/vic-vic-yang/finance-app)（Flutter）。
 
@@ -83,7 +83,7 @@ src/
 ├── reconcile/   对账中心（四项一致性检查，只读报告）
 ├── health/      财务健康评分
 ├── briefing/    每周管家简报（周一 cron）
-├── tools/       工具：汇率换算代理；股票分析（行情 / 基本面 / 评级 / 持仓 / AI 建议）
+├── tools/       工具：汇率换算代理；持仓价格、涨跌与盈亏计算
 ├── app-update/  App 自助升级：版本查询 + APK 下载（热读 app-release/）
 ├── crypto/      SM2/SM3/SM4 实现 + KMS
 └── prisma/      Prisma 连接服务
@@ -102,11 +102,11 @@ src/
 - **CFO 主动扫描**（`notifications/proactive-scan.service.ts`）：每日 08:17 cron 对「近 30 天有记账」用户的账本跑检测器，新建 critical / warning 提案写入通知中心。
 - **每周管家简报**（`briefing/briefing.scheduler.ts`）：每周一 08:37 cron 对「近 14 天有记账且开启简报」的用户生成上周周报（聚合事实 + LLM 正文，失败降级模板），写入通知中心。
 
-### 股票分析 (`src/tools/stock.service.ts`)
+### 持仓行情 (`src/tools/stock.service.ts`)
 
-- 行情 / 基本面 / 分析师评级走 Yahoo Finance（免 key，crumb 流程）；中文名经 LLM 转 ticker。
-- **A 股 / 港股新闻走东方财富按个股流，美股走 Yahoo 按公司名** + LLM 相关性过滤。
-- 结构化 AI 分析（公司简介 / 市场动态 / 评级 / 买入建议），结合用户**持仓**与上次快照做对比。
+- 最新价格与涨跌信息走 Yahoo Finance（免 key，crumb 流程）；中文名经 LLM 转 ticker。
+- A 股 / 港股中文简称通过东方财富公开接口补充。
+- 客户端仅使用最新价格、涨跌信息与中文简称。
 - `StockAnalysis`（查询历史快照）+ `StockHolding`（持仓）两表。
 
 ### App 自助升级 (`src/app-update/`)
@@ -124,7 +124,7 @@ src/
 
 ## 公网访问
 
-通过 Cloudflare Tunnel 暴露：`手机 → 边缘域名 → Tunnel → 本机 :3000`。
+通过阿里云 ECS 暴露：`手机 → finance.equitick.top → Nginx → Docker API :3000`。
 # Admin 自动发版配置
 
 管理后台发版需要在后端 `.env` 配置 `GITHUB_RELEASE_TOKEN`，并在 `finance-app` GitHub 仓库配置以下 Actions Secrets：

@@ -141,13 +141,27 @@ export class OpenAiCompatibleClient implements ChatModel {
           total: data.usage.total_tokens ?? 0,
         }
       : undefined;
+
+    // 透传 tool_calls（function calling）。finish=tool_calls 时 content 常为空，属正常。
+    const toolCalls = Array.isArray(msg.tool_calls)
+      ? msg.tool_calls.map((t: any) => ({
+          id: String(t.id),
+          type: 'function' as const,
+          function: {
+            name: String(t.function?.name ?? ''),
+            arguments: String(t.function?.arguments ?? ''),
+          },
+        }))
+      : undefined;
+
     this.logger.log(
       `chat [${this.name}] ${Date.now() - startedAt}ms ` +
-        `tokens=${usage?.total ?? '?'} finish=${finishReason ?? '?'}`,
+        `tokens=${usage?.total ?? '?'} finish=${finishReason ?? '?'} ` +
+        `tools=${toolCalls?.map((t) => t.function.name).join(',') || '-'}`,
     );
 
-    if (!content) {
-      // 完全空 —— 把全量响应打到 logcat 方便排查，错误信息也带 finish_reason
+    if (!content && (!toolCalls || toolCalls.length === 0)) {
+      // 完全空且无工具调用 —— 把全量响应打到 log 方便排查
       this.logger.error(
         `LLM[${this.name}] empty content. finish=${finishReason}. ` +
           `full response: ${JSON.stringify(data).slice(0, 1500)}`,
@@ -167,18 +181,6 @@ export class OpenAiCompatibleClient implements ChatModel {
         `LLM[${this.name}] 输出被 maxTokens 截断，JSON 可能不完整`,
       );
     }
-
-    // 透传 tool_calls（function calling）
-    const toolCalls = Array.isArray(msg.tool_calls)
-      ? msg.tool_calls.map((t: any) => ({
-          id: String(t.id),
-          type: 'function' as const,
-          function: {
-            name: String(t.function?.name ?? ''),
-            arguments: String(t.function?.arguments ?? ''),
-          },
-        }))
-      : undefined;
 
     return { content, usage, finishReason, toolCalls };
   }

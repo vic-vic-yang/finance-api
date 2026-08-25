@@ -24,6 +24,8 @@ export function shapeUser(user: {
   username: string;
   nickname?: string | null;
   role?: string | null;
+  vipTier?: string | null;
+  vipExpiresAt?: Date | null;
   currentLedgerId?: string | null;
   briefingEnabled?: boolean;
 }) {
@@ -34,6 +36,8 @@ export function shapeUser(user: {
     nickname: user.nickname ?? null,
     displayName: display.length > 0 ? display : user.username,
     role: user.role ?? 'user',
+    vipTier: user.vipTier ?? 'free',
+    vipExpiresAt: user.vipExpiresAt?.toISOString() ?? null,
     ...(user.currentLedgerId !== undefined
       ? { currentLedgerId: user.currentLedgerId }
       : {}),
@@ -144,6 +148,8 @@ export class AuthService {
         username: user.username,
         nickname: user.nickname,
         role: user.role,
+        vipTier: user.vipTier,
+        vipExpiresAt: user.vipExpiresAt,
         currentLedgerId,
       }),
       keyBundle: {
@@ -184,6 +190,9 @@ export class AuthService {
         id: user.id,
         username: user.username,
         nickname: user.nickname,
+        role: user.role,
+        vipTier: user.vipTier,
+        vipExpiresAt: user.vipExpiresAt,
         currentLedgerId: user.currentLedgerId,
         briefingEnabled: user.briefingEnabled,
       }),
@@ -344,9 +353,12 @@ export class AuthService {
    * owned 账本（含账本内 Bill/Account/Category/Budget 等）及
    * Bill/Notification/Briefing/AiImport/AiCorrection/LedgerMember 等。
    */
-  async deleteAccount(userId: string) {
+  async deleteAccount(userId: string, password: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('用户不存在');
+
+    const passwordMatches = await bcrypt.compare(password, user.password);
+    if (!passwordMatches) throw new UnauthorizedException('当前密码不正确');
 
     // 共享账本约束检查
     const ownedShared = await this.prisma.ledger.findFirst({

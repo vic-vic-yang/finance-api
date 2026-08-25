@@ -263,12 +263,16 @@ export class ForecastService {
           return off === 0;
         })
         .map(toLike);
-      // 有 ≥2 个完整月样本时按「固定收入项是否到账」预测，更贴近
-      // 「每月就固定几笔收入」的真实形态；单个月样本退化为月均法
+      // 识别出 ≥1 个固定收入模式时按「是否到账」预测；
+      // 一个都没识别到则回退月均法，避免漏掉工资等导致剩余收入恒为 0。
       const recurring =
         monthsSampled >= 2
           ? detectRecurringIncome(prevBuckets, thisMonthBills)
           : null;
+      const expectedRemainingIncome =
+        recurring && recurring.patterns.length > 0
+          ? recurring.expectedRemaining
+          : undefined;
       const r = monthlyPatternForecast({
         currentNetWorth,
         mtdIncome: monthToDateIncome,
@@ -277,7 +281,7 @@ export class ForecastService {
         avgMonthlyExpense,
         daysElapsed,
         remainingDays,
-        expectedRemainingIncome: recurring?.expectedRemaining,
+        expectedRemainingIncome,
       });
       projected = r.projected;
       remainingIncome = r.remainingIncome;

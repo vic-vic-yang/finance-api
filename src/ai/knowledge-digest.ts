@@ -86,8 +86,36 @@ export type SliceKey =
   | 'loans'
   | 'accounts';
 
-/** 注入文本总长的硬上限（约 800 字） */
-export const DIGEST_MAX_CHARS = 800;
+/** 注入文本总长的硬上限（约 1200 字，含扩展摘要） */
+export const DIGEST_MAX_CHARS = 1200;
+
+/** 由 ChatService 并行拉取的扩展摘要（forecast / health / insights / recurring） */
+export interface DigestEnrichment {
+  forecast?: {
+    currentNetWorth: number;
+    projectedMonthEnd: number;
+    remainingDays: number;
+    mtdExpense: number;
+  };
+  health?: {
+    score: number;
+    grade: string;
+    weakestLabel: string;
+    weakestAdvice: string;
+  };
+  insights?: {
+    total: number;
+    critical: number;
+    titles: string[];
+  };
+  recurring?: {
+    activeCount: number;
+    monthlyFixedExpense: number;
+    nextDueInDays: number | null;
+  };
+}
+
+export type EnrichmentKey = keyof DigestEnrichment;
 
 // ── 关键词路由（纯函数） ──────────────────────────────────────
 
@@ -95,11 +123,16 @@ export const DIGEST_MAX_CHARS = 800;
  * 路由规则：按声明顺序匹配，命中即并入（同一切片去重）。
  * 任何规则都没命中 → 兜底返回全量切片（紧凑模式）。
  */
-export const ROUTE_RULES: { keywords: string[]; slices: SliceKey[] }[] = [
+export const ROUTE_RULES: {
+  keywords: string[];
+  slices: SliceKey[];
+}[] = [
   { keywords: ['预算'], slices: ['budgets'] },
   { keywords: ['目标', '储蓄', '存钱', '攒钱'], slices: ['goals'] },
-  // 注意：不用裸「还」字（会误中「预算还剩多少」），用还款/还钱/还债
-  { keywords: ['欠', '借', '还款', '还钱', '还债', '负债', '贷款'], slices: ['loans'] },
+  // 借贷往来（借入/借出/还款）
+  { keywords: ['借入', '借出', '借贷', '还款', '还钱', '还债'], slices: ['loans'] },
+  // 广义负债：借贷 + 信用卡/负债账户余额
+  { keywords: ['欠', '负债', '贷款'], slices: ['loans', 'accounts'] },
   {
     keywords: ['上月', '上个月', '环比', '同比'],
     slices: ['lastMonth', 'thisMonth'],
@@ -113,6 +146,29 @@ export const ROUTE_RULES: { keywords: string[]; slices: SliceKey[] }[] = [
     keywords: ['余额', '账户', '资产', '多少钱', '净资产'],
     slices: ['accounts'],
   },
+  {
+    keywords: ['预测', '月末', '现金流', '还能剩', '月底'],
+    slices: ['thisMonth', 'accounts'],
+  },
+  {
+    keywords: ['健康', '评分', '财务状况'],
+    slices: ['thisMonth', 'budgets', 'goals'],
+  },
+  {
+    keywords: ['风险', '异常', '预警', '提醒', '洞察'],
+    slices: ['budgets', 'thisMonth'],
+  },
+  {
+    keywords: ['周期', '订阅', '固定支出', '扣款', '房租', '房贷'],
+    slices: ['budgets'],
+  },
+];
+
+const ENRICH_ROUTE_RULES: { keywords: string[]; keys: EnrichmentKey[] }[] = [
+  { keywords: ['预测', '月末', '现金流', '还能剩', '月底'], keys: ['forecast'] },
+  { keywords: ['健康', '评分', '财务状况'], keys: ['health'] },
+  { keywords: ['风险', '异常', '预警', '提醒', '洞察'], keys: ['insights'] },
+  { keywords: ['周期', '订阅', '固定支出', '扣款', '房租', '房贷'], keys: ['recurring'] },
 ];
 
 /** 全量兜底时的切片顺序（紧凑模式同样按此序拼接） */
@@ -124,6 +180,17 @@ const ALL_SLICES: SliceKey[] = [
   'loans',
   'accounts',
 ];
+
+export function routeEnrichment(message: string): EnrichmentKey[] {
+  const hit = new Set<EnrichmentKey>();
+  for (const rule of ENRICH_ROUTE_RULES) {
+    if (rule.keywords.some((k) => message.includes(k))) {
+      for (const k of rule.keys) hit.add(k);
+    }
+  }
+  if (hit.size === 0) return [];
+  return Array.from(hit);
+}
 
 /**
  * 按用户消息选出相关切片。
@@ -238,6 +305,36 @@ export function sliceToText(
 const HEADER =
   '以下是用户账本的真实数据摘要，请基于它回答（摘要没覆盖的再调工具查询）：';
 
+function enrichmentText(key: EnrichmentKey, e: DigestEnrichment): string | null {
+  switch (key) {
+    case 'forecast': {
+      const f = e.forecast;
+      if (!f) return null;
+      return `【现金流预测】当前净资产 ${fmt(f.currentNetWorth)}，预计月末 ${fmt(f.projectedMonthEnd)}（还剩 ${f.remainingDays} 天），本月已支出 ${fmt(f.mtdExpense)}。`;
+    }
+    case 'health': {
+      const h = e.health;
+      if (!h) return null;
+      return `【财务健康】总分 ${h.score}（${h.grade} 级），最弱项「${h.weakestLabel}」：${h.weakestAdvice}。`;
+    }
+    case 'insights': {
+      const i = e.insights;
+      if (!i) return null;
+      if (i.total === 0) return '【消费洞察】当前没有需要关注的预警。';
+      const tops = i.titles.slice(0, 3).join('；');
+      return `【消费洞察】共 ${i.total} 条预警（${i.critical} 条重要）${tops ? `：${tops}` : ''}。`;
+    }
+    case 'recurring': {
+      const r = e.recurring;
+      if (!r) return null;
+      if (r.activeCount === 0) return '【周期账单】还没有订阅/周期账单。';
+      const due =
+        r.nextDueInDays != null ? `最近一笔 ${r.nextDueInDays} 天后到期` : '暂无即将到期';
+      return `【周期账单】${r.activeCount} 项活跃，月固定支出约 ${fmt(r.monthlyFixedExpense)}，${due}。`;
+    }
+  }
+}
+
 /**
  * 组装注入文本：按路由选切片 → 文本化 → 控制在 DIGEST_MAX_CHARS 以内。
  * 截断策略：先用 TOP5 拼全量；超限则降到 TOP3 重拼；仍超限硬截断。
@@ -245,11 +342,29 @@ const HEADER =
 export function buildKnowledgeText(
   message: string,
   slices: DigestSlices,
+  enrichment?: DigestEnrichment,
   maxChars: number = DIGEST_MAX_CHARS,
 ): string {
   const keys = routeSlices(message);
-  const build = (topN: number) =>
-    [HEADER, ...keys.map((k) => sliceToText(k, slices, topN))].join('\n');
+  let enrichKeys = enrichment ? routeEnrichment(message) : [];
+  // 宽泛问题（无关键词命中 → 全量切片）时附带紧凑扩展摘要
+  if (
+    enrichment &&
+    enrichKeys.length === 0 &&
+    keys.length === ALL_SLICES.length
+  ) {
+    enrichKeys = ['forecast', 'health', 'insights', 'recurring'];
+  }
+  const build = (topN: number) => {
+    const parts = [HEADER, ...keys.map((k) => sliceToText(k, slices, topN))];
+    if (enrichment) {
+      for (const ek of enrichKeys) {
+        const t = enrichmentText(ek, enrichment);
+        if (t) parts.push(t);
+      }
+    }
+    return parts.join('\n');
+  };
 
   let text = build(5);
   if (text.length <= maxChars) return text;

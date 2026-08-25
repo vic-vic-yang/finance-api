@@ -11,9 +11,9 @@ location /admin/ {
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 
-# APK 上传最大 200 MB；也可放在同一 server 块中统一生效。
+# APK 上传最大 30 MB；也可放在同一 server 块中统一生效。
 location /api/admin/releases/upload {
-    client_max_body_size 200m;
+    client_max_body_size 30m;
     proxy_request_buffering off;
     proxy_pass http://127.0.0.1:3000;
 }

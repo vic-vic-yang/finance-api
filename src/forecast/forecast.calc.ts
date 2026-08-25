@@ -146,18 +146,28 @@ export interface MonthlyPatternInput {
 
 export interface MonthlyPatternResult {
   projected: Prisma.Decimal;
-  /** 预计剩余收入 = max(0, 月均收入 − 本月已收) */
+  /** 预计剩余收入 = max(0, 月均收入 − 本月已收) 或固定收入未到账合计 */
   remainingIncome: Prisma.Decimal;
-  /** 预计剩余支出 = max(本月日均×剩余天数, 月均支出 − 本月已花) */
+  /** 预计剩余支出：节奏外推 / 月均回归 / 均匀摊销 三者取中位数（避免取大偏悲观） */
   remainingExpense: Prisma.Decimal;
+}
+
+/** 三个 Decimal 的中位数（偶数不会出现；固定 3 个） */
+export function median3(
+  a: Prisma.Decimal,
+  b: Prisma.Decimal,
+  c: Prisma.Decimal,
+): Prisma.Decimal {
+  const xs = [a, b, c].sort((x, y) => x.comparedTo(y));
+  return xs[1];
 }
 
 /**
  * 按「月度收支模式」预测月末净资产：
- *  - 收入是月发事件（工资）：剩余收入 = max(0, 月均 − 已收)，
- *    没发预期会来、已发过不再虚增；
- *  - 支出相对平滑：剩余支出取「当前节奏外推」与「回归历史月均」的较大者，
- *    花得快按节奏、花得慢不低估；
+ *  - 收入是月发事件（工资）：优先用固定收入识别；未识别出模式时回退
+ *    remainingIncome = max(0, 月均 − 已收)；
+ *  - 支出：节奏外推、回归历史月均、按剩余天数均匀摊销 取中位数，
+ *    避免「取大者」系统性偏悲观；
  *  - 周期扣款已含在历史月均中，不再重复加计。
  */
 export function monthlyPatternForecast(
@@ -168,12 +178,22 @@ export function monthlyPatternForecast(
     i.expectedRemainingIncome ??
     Prisma.Decimal.max(zero, i.avgMonthlyIncome.minus(i.mtdIncome));
   const elapsed = Math.max(1, i.daysElapsed);
-  const paceRemaining = i.mtdExpense.div(elapsed).mul(i.remainingDays);
+  const remainingDays = Math.max(0, i.remainingDays);
+  const daysInMonth = Math.max(1, elapsed + remainingDays);
+  const paceRemaining = i.mtdExpense.div(elapsed).mul(remainingDays);
   const revertRemaining = Prisma.Decimal.max(
     zero,
     i.avgMonthlyExpense.minus(i.mtdExpense),
   );
-  const remainingExpense = Prisma.Decimal.max(paceRemaining, revertRemaining);
+  // 若本月按历史月均匀速花完，剩余天数还该花多少
+  const seasonalRemaining = i.avgMonthlyExpense
+    .mul(remainingDays)
+    .div(daysInMonth);
+  const remainingExpense = median3(
+    paceRemaining,
+    revertRemaining,
+    seasonalRemaining,
+  );
   const projected = i.currentNetWorth
     .plus(remainingIncome)
     .minus(remainingExpense);
@@ -300,7 +320,7 @@ export function buildForecastAttribution(i: {
   ];
   if (i.method === 'monthly') {
     out.push({ key: 'income', label: '预计剩余收入（固定收入 / 月均）', amount: i.remainingIncome });
-    out.push({ key: 'expense', label: '预计剩余支出（当前节奏 vs 历史月均取较大者）', amount: i.remainingExpense.neg() });
+    out.push({ key: 'expense', label: '预计剩余支出（节奏 / 月均 / 均匀摊销取中位）', amount: i.remainingExpense.neg() });
   } else {
     out.push({ key: 'daily', label: '按近 30 日日均净流入外推', amount: i.dailyNetInflow });
     out.push({ key: 'recurring', label: '本月剩余周期账单净额', amount: i.remainingRecurringNet });

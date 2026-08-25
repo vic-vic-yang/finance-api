@@ -63,11 +63,11 @@ export class CategoriesService implements OnModuleInit {
         where: { isSystem: true, parentId: null, name: seed.name, type: seed.type as any },
       });
       if (existing) {
-        // 图标/颜色漂移时轻轻对齐（不改 name）
-        if (existing.icon !== seed.icon || existing.color !== seed.color) {
+        // 只对齐颜色；icon 不动——老用户可能仍是 Emoji，新种子是 Material key
+        if (existing.color !== seed.color) {
           await this.prisma.category.update({
             where: { id: existing.id },
-            data: { icon: seed.icon, color: seed.color },
+            data: { color: seed.color },
           });
         }
         continue;
@@ -87,11 +87,11 @@ export class CategoriesService implements OnModuleInit {
           },
         });
         if (oldRow) {
+          // 改名保留原 icon（存量 Emoji），颜色跟种子对齐
           await this.prisma.category.update({
             where: { id: oldRow.id },
             data: {
               name: seed.name,
-              icon: seed.icon,
               color: seed.color,
             },
           });

@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODE="${1:-}"
+ROOT=/opt/siku
+BACKEND="$ROOT/backend"
+ADMIN="$ROOT/admin"
+WEBSITE="$ROOT/website"
+ADMIN_ARCHIVE=/tmp/siku-admin-source.tar.gz
+WEBSITE_ARCHIVE=/tmp/siku-website.tar.gz
+
+case "$MODE" in
+  api|admin|website|services|all|migrate) ;;
+  *) echo "用法: siku-deploy-services api|admin|website|services|all|migrate" >&2; exit 64 ;;
+esac
+
+exec 9>/var/lock/siku-deploy.lock
+flock -n 9 || { echo "已有部署任务正在执行" >&2; exit 75; }
+
+wait_http() {
+  local url="$1"
+  for _ in $(seq 1 30); do
+    curl -fsS "$url" >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
+deploy_api() {
+  echo "[API] 拉取代码"
+  cd "$BACKEND"
+  git pull --ff-only origin main
+  docker image inspect backend-api:latest >/dev/null 2>&1 && docker tag backend-api:latest backend-api:rollback || true
+  echo "[API] 构建镜像"
+  docker compose build api
+  echo "[API] 执行数据库迁移"
+  docker compose run --rm api npx prisma migrate deploy
+  echo "[API] 重启服务"
+  docker compose up -d --no-deps api
+  wait_http http://127.0.0.1:3000/api/app/version || {
+    echo "[API] 健康检查失败，恢复上一镜像" >&2
+    docker image inspect backend-api:rollback >/dev/null 2>&1 || exit 1
+    docker tag backend-api:rollback backend-api:latest
+    docker compose up -d --no-deps --force-recreate api
+    exit 1
+  }
+  echo "[API] 部署成功"
+}
+
+deploy_admin() {
+  [[ -f "$ADMIN_ARCHIVE" ]] || { echo "缺少 Admin 源码包: $ADMIN_ARCHIVE" >&2; exit 66; }
+  local stamp next previous
+  stamp=$(date +%Y%m%d-%H%M%S)
+  next="$ROOT/admin-next-$stamp"
+  previous="$ROOT/admin-previous-$stamp"
+  mkdir -p "$next"
+  tar -xzf "$ADMIN_ARCHIVE" -C "$next"
+  rm -f "$ADMIN_ARCHIVE"
+  mv "$ADMIN" "$previous"
+  mv "$next" "$ADMIN"
+  cd "$BACKEND"
+  docker image inspect backend-admin:latest >/dev/null 2>&1 && docker tag backend-admin:latest backend-admin:rollback || true
+  echo "[Admin] 构建镜像"
+  if ! docker compose build admin; then
+    rm -rf "$ADMIN"
+    mv "$previous" "$ADMIN"
+    exit 1
+  fi
+  docker compose up -d --no-deps admin
+  wait_http http://127.0.0.1:3001/admin/login || {
+    echo "[Admin] 健康检查失败，恢复上一版本" >&2
+    rm -rf "$ADMIN"
+    mv "$previous" "$ADMIN"
+    if docker image inspect backend-admin:rollback >/dev/null 2>&1; then
+      docker tag backend-admin:rollback backend-admin:latest
+      docker compose up -d --no-deps --force-recreate admin
+    fi
+    exit 1
+  }
+  mkdir -p "$ROOT/backups"
+  tar -czf "$ROOT/backups/admin-$stamp.tar.gz" -C "$previous" .
+  rm -rf "$previous"
+  find "$ROOT/backups" -maxdepth 1 -name 'admin-*.tar.gz' -printf '%T@ %p\n' \
+    | sort -rn | tail -n +4 | cut -d' ' -f2- | xargs -r rm -f
+  echo "[Admin] 部署成功"
+}
+
+deploy_website() {
+  [[ -f "$WEBSITE_ARCHIVE" ]] || { echo "缺少官网文件包: $WEBSITE_ARCHIVE" >&2; exit 66; }
+  local stamp previous
+  stamp=$(date +%Y%m%d-%H%M%S)
+  previous="$ROOT/website-previous-$stamp"
+  [[ -d "$WEBSITE" ]] && mv "$WEBSITE" "$previous"
+  mkdir -p "$WEBSITE"
+  if ! tar -xzf "$WEBSITE_ARCHIVE" -C "$WEBSITE"; then
+    rm -rf "$WEBSITE"
+    [[ -d "$previous" ]] && mv "$previous" "$WEBSITE"
+    exit 1
+  fi
+  rm -f "$WEBSITE_ARCHIVE"
+  nginx -t
+  systemctl reload nginx
+  curl -fsS -H 'Host: www.equitick.top' http://127.0.0.1/ >/dev/null || {
+    echo "[官网] 健康检查失败，恢复上一版本" >&2
+    rm -rf "$WEBSITE"
+    [[ -d "$previous" ]] && mv "$previous" "$WEBSITE"
+    systemctl reload nginx
+    exit 1
+  }
+  if [[ -d "$previous" ]]; then
+    mkdir -p "$ROOT/backups"
+    tar -czf "$ROOT/backups/website-$stamp.tar.gz" -C "$previous" .
+    rm -rf "$previous"
+    find "$ROOT/backups" -maxdepth 1 -name 'website-*.tar.gz' -printf '%T@ %p\n' \
+      | sort -rn | tail -n +4 | cut -d' ' -f2- | xargs -r rm -f
+  fi
+  echo "[官网] 部署成功"
+}
+
+run_migrations() {
+  cd "$BACKEND"
+  docker compose run --rm api npx prisma migrate deploy
+  echo "[数据库] 迁移完成"
+}
+
+case "$MODE" in
+  api) deploy_api ;;
+  admin) deploy_admin ;;
+  website) deploy_website ;;
+  services) deploy_api; deploy_admin ;;
+  all) deploy_api; deploy_admin; deploy_website ;;
+  migrate) run_migrations ;;
+esac

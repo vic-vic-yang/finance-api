@@ -20,6 +20,7 @@ import { BriefingEnabledDto } from './dto/briefing-enabled.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { RecoverStartDto } from './dto/recover-start.dto';
 import { RecoverFinishDto } from './dto/recover-finish.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -100,8 +101,9 @@ export class AuthController {
   // 注销账号：上架合规要求，删除用户及个人数据（先清共享账本约束）
   @UseGuards(AuthGuard('jwt'))
   @Delete('me')
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @HttpCode(HttpStatus.OK)
-  deleteMe(@Req() req: any) {
-    return this.authService.deleteAccount(req.user.id);
+  deleteMe(@Req() req: any, @Body() dto: DeleteAccountDto) {
+    return this.authService.deleteAccount(req.user.id, dto.password);
   }
 }

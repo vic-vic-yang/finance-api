@@ -30,7 +30,7 @@ async function bootstrap() {
     credentials: true,
   });
 
-  // CF Tunnel 在前面做了反代，需要信任代理头（X-Forwarded-For）才能让限流拿到真实 IP
+  // Nginx 在前面做反代，需要信任代理头（X-Forwarded-For）才能让限流拿到真实 IP
   app.getHttpAdapter().getInstance().set('trust proxy', 1);
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));

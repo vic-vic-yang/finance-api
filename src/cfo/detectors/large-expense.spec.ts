@@ -19,11 +19,32 @@ describe('detectLargeExpense', () => {
     expect(out[0].dedupeKey).toBe('large:1');
     expect((out[0].actionParams as any).billId).toBe('1');
   });
-  it('超分类近 3 月均值 ×3 也产出', () => {
-    const recent = [eb('h1', 100, '餐饮', 40), eb('h2', 100, '餐饮', 50)];
-    const cur = eb('big', 400, '餐饮', 1); // 均值100, 400>300
+  it('超分类近 3 月均值 ×5 且金额 ≥500 才产出相对异常', () => {
+    // 均值 100，需 ≥3 笔基线；600 > 100×5 且 ≥500
+    const recent = [
+      eb('h1', 100, '餐饮', 40),
+      eb('h2', 100, '餐饮', 50),
+      eb('h3', 100, '餐饮', 60),
+    ];
+    const cur = eb('big', 600, '餐饮', 1);
     const out = detectLargeExpense(base({ bills: [cur], recentBills: [...recent, cur] }));
     expect(out.map((p) => (p.actionParams as any).billId)).toContain('big');
+  });
+  it('倍数虽高但绝对金额 <500 的日常消费不提示（如买菜 180）', () => {
+    const recent = [
+      eb('h1', 37, '日用', 40),
+      eb('h2', 37, '日用', 50),
+      eb('h3', 37, '日用', 60),
+    ];
+    const cur = eb('small', 180, '日用', 1); // ≈4.9 倍，但不足 500
+    const out = detectLargeExpense(base({ bills: [cur], recentBills: [...recent, cur] }));
+    expect(out).toHaveLength(0);
+  });
+  it('基线不足 3 笔时不算相对异常（避免偶然均值）', () => {
+    const recent = [eb('h1', 100, '餐饮', 40), eb('h2', 100, '餐饮', 50)];
+    const cur = eb('big', 600, '餐饮', 1);
+    const out = detectLargeExpense(base({ bills: [cur], recentBills: [...recent, cur] }));
+    expect(out).toHaveLength(0);
   });
   it('普通小额不产出', () => {
     const out = detectLargeExpense(base({ bills: [eb('1', 30)], recentBills: [eb('1', 30)] }));

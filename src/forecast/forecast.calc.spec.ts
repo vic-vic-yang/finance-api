@@ -93,10 +93,11 @@ describe('monthlyPatternForecast', () => {
       daysElapsed: 15,
       remainingDays: 15,
     });
-    // 剩余收入 6000；剩余支出 max(1000/15×15=1000, 3000−1000=2000) = 2000
+    // 剩余收入 6000；
+    // 节奏 1000、回归 2000、均匀 1500 → 中位 1500
     expect(out.remainingIncome.toNumber()).toBe(6000);
-    expect(out.remainingExpense.toNumber()).toBe(2000);
-    expect(out.projected.toNumber()).toBe(14000);
+    expect(out.remainingExpense.toNumber()).toBe(1500);
+    expect(out.projected.toNumber()).toBe(14500);
   });
 
   it('工资已发且超月均：剩余收入为 0，不虚增', () => {
@@ -110,10 +111,11 @@ describe('monthlyPatternForecast', () => {
       remainingDays: 15,
     });
     expect(out.remainingIncome.toNumber()).toBe(0);
-    expect(out.projected.toNumber()).toBe(10000 - 2000);
+    // 节奏 1000、回归 2000、均匀 1500 → 中位 1500
+    expect(out.projected.toNumber()).toBe(8500);
   });
 
-  it('本月花得比历史快：剩余支出按当前节奏外推', () => {
+  it('本月花得比历史快：中位数缓和取大偏悲观', () => {
     const out = monthlyPatternForecast({
       currentNetWorth: d(10000),
       mtdIncome: d(6000),
@@ -123,13 +125,12 @@ describe('monthlyPatternForecast', () => {
       daysElapsed: 10,
       remainingDays: 20,
     });
-    // 节奏 2500/10×20 = 5000 > 回归 3000−2500=500 → 取 5000
-    expect(out.remainingExpense.toNumber()).toBe(5000);
-    // projected = 10000 + (6000−6000) − 5000
-    expect(out.projected.toNumber()).toBe(5000);
+    // 节奏 5000、回归 500、均匀 2000 → 中位 2000
+    expect(out.remainingExpense.toNumber()).toBe(2000);
+    expect(out.projected.toNumber()).toBe(8000);
   });
 
-  it('月末最后一天：剩余天数 0 时支出只剩月均回归项', () => {
+  it('月末最后一天：剩余天数 0 时支出三项皆 0', () => {
     const out = monthlyPatternForecast({
       currentNetWorth: d(10000),
       mtdIncome: d(6000),
@@ -139,10 +140,9 @@ describe('monthlyPatternForecast', () => {
       daysElapsed: 31,
       remainingDays: 0,
     });
-    // 节奏外推 = 0；回归 = max(0, 3000−2800) = 200
     expect(out.remainingIncome.toNumber()).toBe(0);
-    expect(out.remainingExpense.toNumber()).toBe(200);
-    expect(out.projected.toNumber()).toBe(9800);
+    expect(out.remainingExpense.toNumber()).toBe(0);
+    expect(out.projected.toNumber()).toBe(10000);
   });
 
   it('daysElapsed = 0 按 1 天兜底，不除零', () => {
@@ -156,6 +156,20 @@ describe('monthlyPatternForecast', () => {
       remainingDays: 30,
     });
     expect(out.projected.toNumber()).toBe(1000);
+  });
+
+  it('显式传入 expectedRemainingIncome=0 时不回退月均', () => {
+    const out = monthlyPatternForecast({
+      currentNetWorth: d(10000),
+      mtdIncome: d(0),
+      mtdExpense: d(0),
+      avgMonthlyIncome: d(6000),
+      avgMonthlyExpense: d(3000),
+      daysElapsed: 10,
+      remainingDays: 20,
+      expectedRemainingIncome: d(0),
+    });
+    expect(out.remainingIncome.toNumber()).toBe(0);
   });
 });
 

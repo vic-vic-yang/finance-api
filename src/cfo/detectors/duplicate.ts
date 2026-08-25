@@ -20,7 +20,7 @@ export function detectDuplicate(input: DetectorInput): ProposalDraft[] {
         title: `疑似重复扣费 ¥${a.amount.toFixed(2)}`,
         body: `同一账户在 10 分钟内有两笔相同金额 ¥${a.amount.toFixed(2)} 的支出，疑似重复。要删掉较晚的一笔吗？`,
         actionKind: 'delete_bill',
-        actionParams: { billId: late.id },
+        actionParams: { billId: late.id, billIds: [early.id, late.id] },
         requiresClient: false,
         evidenceRefs: { billIds: [early.id, late.id] },
         dedupeKey: `dup:${early.id}:${late.id}`,

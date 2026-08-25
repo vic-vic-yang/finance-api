@@ -5,7 +5,7 @@ import * as path from 'path';
 
 /**
  * App 自助升级：发布脚本把新 APK 拷到 backend/app-release/ 并写 version.json，
- * 这里对外提供「查最新版本」与「下载安装包」。基于自建服务器（Cloudflare Tunnel）。
+ * 这里对外提供「查最新版本」与「下载安装包」。基于阿里云 ECS + Nginx。
  */
 @Injectable()
 export class AppUpdateService {
