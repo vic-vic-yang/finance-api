@@ -1,7 +1,31 @@
-import { IsOptional, IsEnum, IsString, IsNumber, IsDateString } from 'class-validator';
+import { IsOptional, IsEnum, IsString, IsNumber, IsDateString, IsInt, Min, Max, Matches } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class QueryBillDto {
+  @IsOptional()
+  @IsEnum(['day', 'week', 'month', 'quarter', 'year'])
+  groupBy?: 'day' | 'week' | 'month' | 'quarter' | 'year';
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  @IsDateString()
+  beforeGroup?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(-840)
+  @Max(840)
+  timezoneOffset?: number = 480;
+
+  @IsOptional()
+  @IsDateString()
+  startAt?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endBefore?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsNumber()

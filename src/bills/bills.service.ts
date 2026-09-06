@@ -9,6 +9,7 @@ import { CreateBillDto } from './dto/create-bill.dto';
 import { UpdateBillDto } from './dto/update-bill.dto';
 import { ConvertBillDto } from './dto/convert-bill.dto';
 import { QueryBillDto } from './dto/query-bill.dto';
+import { buildGroupQuery, groupRange } from './bill-groups';
 
 const BILL_INCLUDE = {
   category: { select: { id: true, name: true, icon: true, color: true } },
@@ -87,8 +88,9 @@ export class BillsService {
     }
     if (startDate || endDate) {
       where.date = {};
-      if (startDate) (where.date as any).gte = new Date(startDate);
-      if (endDate) (where.date as any).lte = new Date(`${endDate}T23:59:59.999`);
+      const offset = query.timezoneOffset ?? 480;
+      if (startDate) (where.date as any).gte = new Date(groupRange(startDate.slice(0, 10), 'day', offset).startAt);
+      if (endDate) (where.date as any).lt = new Date(groupRange(endDate.slice(0, 10), 'day', offset).endBefore);
     }
     if (minAmount != null || maxAmount != null) {
       where.amount = {};
@@ -96,28 +98,47 @@ export class BillsService {
       if (maxAmount != null) (where.amount as any).lte = maxAmount;
     }
 
+    if (query.startAt || query.endBefore) {
+      where.AND = [{date: {
+        ...(query.startAt ? {gte: new Date(query.startAt)} : {}),
+        ...(query.endBefore ? {lt: new Date(query.endBefore)} : {}),
+      }}];
+    }
+    if (query.groupBy) {
+      const groupLimit = 12;
+      const offset = query.timezoneOffset ?? 480;
+      const [rows, income, expense] = await Promise.all([
+        this.prisma.$queryRaw<Array<{key: string; count: number; income: Prisma.Decimal; expense: Prisma.Decimal}>>(
+          buildGroupQuery(where, query.groupBy, offset, groupLimit, query.beforeGroup)),
+        this.prisma.bill.aggregate({where: {AND: [where, {type: 'income', isTransfer: false, source: {not: 'stock'}}]}, _sum: {amount: true}}),
+        this.prisma.bill.aggregate({where: {AND: [where, {type: 'expense', isTransfer: false, source: {not: 'stock'}}]}, _sum: {amount: true}}),
+      ]);
+      const groups = rows.slice(0, groupLimit).map(row => ({
+        key: row.key, count: row.count,
+        income: Number(row.income), expense: Number(row.expense),
+        balance: Number(new Prisma.Decimal(row.income).minus(row.expense)),
+        ...groupRange(row.key, query.groupBy!, offset),
+      }));
+      return {groups, nextGroup: rows.length > groupLimit ? groups[groups.length - 1].key : null,
+        summary: {totalIncome: Number(income._sum.amount ?? 0), totalExpense: Number(expense._sum.amount ?? 0)}};
+    }
+
     const [bills, total, incomeAgg, expenseAgg] = await Promise.all([
       this.prisma.bill.findMany({
         where, include: BILL_INCLUDE,
-        orderBy: { date: 'desc' }, skip, take: Number(limit),
+        orderBy: [{ date: 'desc' }, { id: 'desc' }], skip, take: Number(limit),
       }),
       this.prisma.bill.count({ where }),
       this.prisma.bill.aggregate({
         // 转账账单与股票纸面盈亏不计入收支汇总（列表默认也不显示股票纸面盈亏）
         where: {
-          ...where,
-          type: 'income',
-          isTransfer: false,
-          source: { not: 'stock' },
+          AND: [where, {type: 'income', isTransfer: false, source: {not: 'stock'}}],
         },
         _sum: { amount: true },
       }),
       this.prisma.bill.aggregate({
         where: {
-          ...where,
-          type: 'expense',
-          isTransfer: false,
-          source: { not: 'stock' },
+          AND: [where, {type: 'expense', isTransfer: false, source: {not: 'stock'}}],
         },
         _sum: { amount: true },
       }),
